@@ -1,0 +1,176 @@
+{
+  "profile": {
+    "taxpayerType": "household",
+    "taxCode": "0312345678",
+    "businessName": "Hộ kinh doanh An Nhiên",
+    "ownerName": "Nguyễn Minh An",
+    "address": "24 Nguyễn Văn Trỗi, Phú Nhuận, TP.HCM",
+    "industry": "distribution",
+    "declarationKind": "quarter",
+    "householdTaxMethod": "revenue_percentage"
+  },
+  "periods": [
+    {
+      "id": "2026-q3",
+      "label": "Quý 3/2026",
+      "year": 2026,
+      "kind": "quarter",
+      "status": "completed",
+      "dueDate": "2026-10-31",
+      "paidAmount": 0,
+      "lockedAt": "2026-08-11T09:25:14.401520477Z",
+      "taxSnapshot": {
+        "periodId": "2026-q3",
+        "revenue": 0,
+        "expenses": 0,
+        "vatRateBps": 0,
+        "pitRateBps": 0,
+        "vat": 0,
+        "pit": 0,
+        "totalTax": 0,
+        "paid": 0,
+        "remaining": 0,
+        "formulaVersion": "2026-no-revenue",
+        "lines": [],
+        "calculatedAt": "2026-08-11T09:25:14.401517569Z"
+      }
+    },
+    {
+      "id": "2026-q2",
+      "label": "Quý 2/2026",
+      "year": 2026,
+      "kind": "quarter",
+      "status": "draft",
+      "dueDate": "2026-07-31",
+      "paidAmount": 0
+    },
+    {
+      "id": "2026-q1",
+      "label": "Quý 1/2026",
+      "year": 2026,
+      "kind": "quarter",
+      "status": "draft",
+      "dueDate": "2026-04-30",
+      "paidAmount": 0
+    }
+  ],
+  "transactions": [
+    {
+      "id": "4702afbf-e40c-496c-85a2-0f2105475c3d",
+      "periodId": "2026-q2",
+      "date": "2026-08-11",
+      "type": "revenue",
+      "description": "1",
+      "invoiceNo": "HD-48935",
+      "amount": 1,
+      "revenueCategory": "distribution",
+      "paymentStatus": "paid"
+    },
+    {
+      "id": "f0fb1b4e-69ac-4dc9-95b2-dffc00a71ea7",
+      "periodId": "2026-q1",
+      "date": "2026-08-11",
+      "type": "revenue",
+      "description": "1",
+      "invoiceNo": "HD-36192",
+      "amount": 1,
+      "revenueCategory": "distribution",
+      "paymentStatus": "paid"
+    }
+  ],
+  "declarations": [
+    {
+      "id": "vat-2026-q3",
+      "taxType": "vat",
+      "formCode": "01/GTGT",
+      "formName": "Tờ khai thuế giá trị gia tăng",
+      "periodLabel": "Quý 3/2026",
+      "periodType": "quarter",
+      "status": "draft",
+      "schemaVersion": "TT80-01GTGT-draft",
+      "values": {
+        "deductibleInputVat": 0,
+        "outputVat": 0,
+        "payableVat": 0
+      },
+      "updatedAt": "2026-08-11T08:45:03.467857089Z"
+    },
+    {
+      "id": "pit-2026-q3",
+      "taxType": "pit",
+      "formCode": "05/KK-TNCN",
+      "formName": "Tờ khai khấu trừ thuế thu nhập cá nhân",
+      "periodLabel": "Quý 3/2026",
+      "periodType": "quarter",
+      "status": "draft",
+      "schemaVersion": "TT80-05KKTNCN-draft",
+      "values": {
+        "employees": 0,
+        "taxableIncome": 0,
+        "withheldTax": 0
+      },
+      "updatedAt": "2026-08-11T08:45:03.467857185Z"
+    },
+    {
+      "id": "cit-2026",
+      "taxType": "cit",
+      "formCode": "03/TNDN",
+      "formName": "Tờ khai quyết toán thuế thu nhập doanh nghiệp",
+      "periodLabel": "Năm 2026",
+      "periodType": "year",
+      "status": "draft",
+      "schemaVersion": "TT80-03TNDN-draft",
+      "values": {
+        "deductibleExpenses": 0,
+        "payableTax": 0,
+        "revenue": 0,
+        "taxableIncome": 0
+      },
+      "updatedAt": "2026-08-11T08:45:03.467857228Z"
+    }
+  ],
+  "audit": [
+    {
+      "id": "audit-0a466fa4edffe06d",
+      "at": "2026-08-11T09:29:08.938372641Z",
+      "action": "Cập nhật giao dịch",
+      "detail": "1 · 1 VND"
+    },
+    {
+      "id": "audit-797f5d5b5eec9a48",
+      "at": "2026-08-11T09:28:56.195647181Z",
+      "action": "Cập nhật giao dịch",
+      "detail": "1 · 1 VND"
+    },
+    {
+      "id": "audit-8fd9c85a6e7a75bc",
+      "at": "2026-08-11T09:25:14.401520477Z",
+      "action": "Khóa kỳ kê khai",
+      "detail": "Quý 3/2026 · 2026-no-revenue"
+    },
+    {
+      "id": "audit-23ebf569bcf2bff0",
+      "at": "2026-08-11T09:14:31.834686089Z",
+      "action": "Xóa giao dịch",
+      "detail": "a · 1 VND"
+    },
+    {
+      "id": "audit-92347fc7db5f4b1c",
+      "at": "2026-08-11T09:14:22.640999588Z",
+      "action": "Cập nhật giao dịch",
+      "detail": "a · 1 VND"
+    },
+    {
+      "id": "audit-44af950090ba809f",
+      "at": "2026-08-11T09:13:29.093023691Z",
+      "action": "Xóa giao dịch",
+      "detail": "a · 1 VND"
+    },
+    {
+      "id": "audit-394db5de7015fe7b",
+      "at": "2026-08-11T08:57:10.669639275Z",
+      "action": "Cập nhật giao dịch",
+      "detail": "a · 1 VND"
+    }
+  ]
+}

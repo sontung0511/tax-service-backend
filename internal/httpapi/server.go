@@ -1,0 +1,649 @@
+package httpapi
+
+import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"tax-client/backend/internal/domain"
+	"tax-client/backend/internal/repository"
+	"tax-client/backend/internal/taxengine"
+	"tax-client/backend/internal/validation"
+)
+
+const maxBodyBytes = 10 << 20
+
+var (
+	errNotFound = errors.New("resource not found")
+	errConflict = errors.New("resource conflict")
+)
+
+type Config struct {
+	AllowedOrigin string
+	Token         string
+	Logger        *slog.Logger
+	Now           func() time.Time
+}
+
+type Server struct {
+	repo          repository.Repository
+	allowedOrigin string
+	token         string
+	logger        *slog.Logger
+	now           func() time.Time
+}
+
+func New(repo repository.Repository, cfg Config) http.Handler {
+	if cfg.AllowedOrigin == "" {
+		cfg.AllowedOrigin = "http://localhost:3000"
+	}
+	if cfg.Token == "" {
+		cfg.Token = "mock-session-token"
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	s := &Server{repo: repo, allowedOrigin: cfg.AllowedOrigin, token: cfg.Token, logger: cfg.Logger, now: cfg.Now}
+
+	public := http.NewServeMux()
+	public.HandleFunc("GET /healthz", s.health)
+	public.HandleFunc("POST /api/login", s.login)
+
+	protected := http.NewServeMux()
+	protected.HandleFunc("GET /api/database", s.getDatabase)
+	protected.HandleFunc("GET /api/profile", s.profile)
+	protected.HandleFunc("PUT /api/profile", s.profile)
+	protected.HandleFunc("GET /api/tax-periods", s.taxPeriods)
+	protected.HandleFunc("POST /api/tax-periods", s.taxPeriods)
+	protected.HandleFunc("POST /api/tax-periods/{id}/lock", s.lockPeriod)
+	protected.HandleFunc("GET /api/transactions", s.transactions)
+	protected.HandleFunc("POST /api/transactions", s.transactions)
+	protected.HandleFunc("DELETE /api/transactions/{id}", s.deleteTransaction)
+	protected.HandleFunc("POST /api/calculate", s.calculate)
+	protected.HandleFunc("POST /api/imports", s.importTransactions)
+	protected.HandleFunc("GET /api/exports", s.exportData)
+	protected.HandleFunc("GET /api/declarations", s.declarations)
+	protected.HandleFunc("PUT /api/declarations/{id}", s.declarations)
+	protected.HandleFunc("GET /api/audit", s.audit)
+
+	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.URL.Path == "/healthz" || r.URL.Path == "/api/login" {
+			public.ServeHTTP(w, r)
+			return
+		}
+		s.auth(protected).ServeHTTP(w, r)
+	})
+	return s.recover(s.cors(s.log(root)))
+}
+
+func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := decode(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(input.Username), []byte("demo")) != 1 || subtle.ConstantTimeCompare([]byte(input.Password), []byte("demo123")) != 1 {
+		writeError(w, http.StatusUnauthorized, "invalid_credentials", "tài khoản hoặc mật khẩu không đúng")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": s.token, "displayName": "Nguyễn Minh An"})
+}
+
+func (s *Server) getDatabase(w http.ResponseWriter, r *http.Request) {
+	db, err := s.repo.Snapshot(r.Context())
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, db)
+}
+
+func (s *Server) profile(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		db, err := s.repo.Snapshot(r.Context())
+		if err != nil {
+			s.internal(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, db.Profile)
+		return
+	}
+	var profile domain.BusinessProfile
+	if err := decode(w, r, &profile); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if err := validateProfile(profile); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		return
+	}
+	err := s.repo.Update(r.Context(), func(db *domain.Database) error {
+		db.Profile = profile
+		prependAudit(db, s.now(), "Cập nhật hồ sơ", profile.BusinessName)
+		return nil
+	})
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
+func (s *Server) taxPeriods(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		db, err := s.repo.Snapshot(r.Context())
+		if err != nil {
+			s.internal(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, db.Periods)
+		return
+	}
+	var period domain.TaxPeriod
+	if err := decode(w, r, &period); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if period.ID == "" {
+		period.ID = newID("period")
+	}
+	if err := validatePeriod(period); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		return
+	}
+	err := s.repo.Update(r.Context(), func(db *domain.Database) error {
+		for _, item := range db.Periods {
+			if item.ID == period.ID {
+				return errConflict
+			}
+		}
+		db.Periods = append([]domain.TaxPeriod{period}, db.Periods...)
+		prependAudit(db, s.now(), "Tạo kỳ kê khai", period.Label)
+		return nil
+	})
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "period_exists", "kỳ kê khai đã tồn tại")
+		return
+	}
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, period)
+}
+
+func (s *Server) lockPeriod(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var locked domain.TaxPeriod
+	err := s.repo.Update(r.Context(), func(db *domain.Database) error {
+		period := findPeriod(db.Periods, id)
+		if period == nil {
+			return errNotFound
+		}
+		if period.LockedAt != nil {
+			locked = *period
+			return nil
+		}
+		periodItems := filterTransactions(db.Transactions, id)
+		if issues := validation.Transactions(periodItems); len(issues) > 0 {
+			return validationError{issues}
+		}
+		result, err := taxengine.Calculate(*period, db.Transactions, s.now())
+		if err != nil {
+			return err
+		}
+		now := s.now().UTC()
+		period.Status = "completed"
+		period.LockedAt = &now
+		period.TaxSnapshot = &result
+		locked = *period
+		prependAudit(db, now, "Khóa kỳ kê khai", fmt.Sprintf("%s · %s", period.Label, result.FormulaVersion))
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "period_not_found", "không tìm thấy kỳ kê khai")
+		return
+	}
+	var ve validationError
+	if errors.As(err, &ve) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": map[string]any{"code": "invalid_transactions", "message": "dữ liệu giao dịch chưa hợp lệ", "issues": ve.issues}})
+		return
+	}
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, locked)
+}
+
+func (s *Server) transactions(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		db, err := s.repo.Snapshot(r.Context())
+		if err != nil {
+			s.internal(w, err)
+			return
+		}
+		items := db.Transactions
+		if periodID := r.URL.Query().Get("periodId"); periodID != "" {
+			items = filterTransactions(items, periodID)
+		}
+		writeJSON(w, http.StatusOK, items)
+		return
+	}
+	var item domain.Transaction
+	if err := decode(w, r, &item); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if item.ID == "" {
+		item.ID = newID("tx")
+	}
+	err := s.repo.Update(r.Context(), func(db *domain.Database) error {
+		period := findPeriod(db.Periods, item.PeriodID)
+		if period == nil {
+			return errNotFound
+		}
+		if period.LockedAt != nil {
+			return errConflict
+		}
+		candidate := append(append([]domain.Transaction{}, db.Transactions...), item)
+		if issues := validation.Transactions(candidate); len(issues) > 0 {
+			return validationError{issues}
+		}
+		db.Transactions = append([]domain.Transaction{item}, db.Transactions...)
+		prependAudit(db, s.now(), "Cập nhật giao dịch", fmt.Sprintf("%s · %d VND", item.Description, item.Amount))
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "period_not_found", "không tìm thấy kỳ kê khai")
+		return
+	}
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "period_locked", "kỳ kê khai đã khóa")
+		return
+	}
+	var ve validationError
+	if errors.As(err, &ve) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": map[string]any{"code": "validation_error", "message": "giao dịch không hợp lệ", "issues": ve.issues}})
+		return
+	}
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) deleteTransaction(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	err := s.repo.Update(r.Context(), func(db *domain.Database) error {
+		for index, item := range db.Transactions {
+			if item.ID != id {
+				continue
+			}
+			period := findPeriod(db.Periods, item.PeriodID)
+			if period != nil && period.LockedAt != nil {
+				return errConflict
+			}
+			db.Transactions = append(db.Transactions[:index], db.Transactions[index+1:]...)
+			prependAudit(db, s.now(), "Xóa giao dịch", fmt.Sprintf("%s · %d VND", item.Description, item.Amount))
+			return nil
+		}
+		return errNotFound
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "transaction_not_found", "không tìm thấy giao dịch")
+		return
+	}
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "period_locked", "không thể xóa giao dịch của kỳ đã khóa")
+		return
+	}
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) calculate(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		PeriodID string `json:"periodId"`
+	}
+	if err := decode(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	db, err := s.repo.Snapshot(r.Context())
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	period := findPeriod(db.Periods, input.PeriodID)
+	if period == nil {
+		writeError(w, http.StatusNotFound, "period_not_found", "không tìm thấy kỳ kê khai")
+		return
+	}
+	if period.TaxSnapshot != nil {
+		writeJSON(w, http.StatusOK, period.TaxSnapshot)
+		return
+	}
+	result, err := taxengine.Calculate(*period, db.Transactions, s.now())
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "calculation_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) importTransactions(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Items []domain.Transaction `json:"items"`
+	}
+	if err := decode(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if len(input.Items) == 0 {
+		writeError(w, http.StatusUnprocessableEntity, "empty_import", "file import không có dữ liệu")
+		return
+	}
+	err := s.repo.Update(r.Context(), func(db *domain.Database) error {
+		for i := range input.Items {
+			if input.Items[i].ID == "" {
+				input.Items[i].ID = newID("tx")
+			}
+			period := findPeriod(db.Periods, input.Items[i].PeriodID)
+			if period == nil {
+				return errNotFound
+			}
+			if period.LockedAt != nil {
+				return errConflict
+			}
+		}
+		candidate := append(append([]domain.Transaction{}, db.Transactions...), input.Items...)
+		if issues := validation.Transactions(candidate); len(issues) > 0 {
+			return validationError{issues}
+		}
+		db.Transactions = append(input.Items, db.Transactions...)
+		prependAudit(db, s.now(), "Import dữ liệu", fmt.Sprintf("Đã nhập %d giao dịch", len(input.Items)))
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "period_not_found", "import chứa kỳ kê khai không tồn tại")
+		return
+	}
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "period_locked", "không thể import vào kỳ đã khóa")
+		return
+	}
+	var ve validationError
+	if errors.As(err, &ve) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": map[string]any{"code": "validation_error", "message": "dữ liệu import không hợp lệ", "issues": ve.issues}})
+		return
+	}
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"imported": len(input.Items)})
+}
+
+func (s *Server) exportData(w http.ResponseWriter, r *http.Request) {
+	periodID := r.URL.Query().Get("periodId")
+	if periodID == "" {
+		writeError(w, http.StatusBadRequest, "period_required", "thiếu periodId")
+		return
+	}
+	db, err := s.repo.Snapshot(r.Context())
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	period := findPeriod(db.Periods, periodID)
+	if period == nil {
+		writeError(w, http.StatusNotFound, "period_not_found", "không tìm thấy kỳ kê khai")
+		return
+	}
+	result := period.TaxSnapshot
+	if result == nil {
+		calculated, err := taxengine.Calculate(*period, db.Transactions, s.now())
+		if err != nil {
+			writeError(w, http.StatusUnprocessableEntity, "calculation_error", err.Error())
+			return
+		}
+		result = &calculated
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=tax-export-%s.json", periodID))
+	writeJSON(w, http.StatusOK, map[string]any{"profile": db.Profile, "period": period, "result": result, "transactions": filterTransactions(db.Transactions, periodID)})
+}
+
+func (s *Server) declarations(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		db, err := s.repo.Snapshot(r.Context())
+		if err != nil {
+			s.internal(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, db.Declarations)
+		return
+	}
+	var input domain.TaxDeclaration
+	if err := decode(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if input.ID != r.PathValue("id") {
+		writeError(w, http.StatusBadRequest, "id_mismatch", "id trong URL và payload không khớp")
+		return
+	}
+	if err := validateDeclaration(input); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		return
+	}
+	err := s.repo.Update(r.Context(), func(db *domain.Database) error {
+		for i := range db.Declarations {
+			if db.Declarations[i].ID != input.ID {
+				continue
+			}
+			if db.Declarations[i].LockedAt != nil {
+				return errConflict
+			}
+			input.UpdatedAt = s.now().UTC()
+			db.Declarations[i] = input
+			prependAudit(db, s.now(), "Cập nhật tờ khai doanh nghiệp", input.FormCode+" · "+input.PeriodLabel)
+			return nil
+		}
+		return errNotFound
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "declaration_not_found", "không tìm thấy tờ khai")
+		return
+	}
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "declaration_locked", "tờ khai đã khóa")
+		return
+	}
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, input)
+}
+
+func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
+	db, err := s.repo.Snapshot(r.Context())
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, db.Audit)
+}
+
+type validationError struct{ issues []validation.Issue }
+
+func (e validationError) Error() string { return "validation failed" }
+
+func validateProfile(p domain.BusinessProfile) error {
+	if p.TaxpayerType != "household" && p.TaxpayerType != "enterprise" {
+		return errors.New("taxpayerType phải là household hoặc enterprise")
+	}
+	if strings.TrimSpace(p.TaxCode) == "" || strings.TrimSpace(p.BusinessName) == "" {
+		return errors.New("thiếu mã số thuế hoặc tên người nộp thuế")
+	}
+	if p.DeclarationKind != "month" && p.DeclarationKind != "quarter" {
+		return errors.New("declarationKind không hợp lệ")
+	}
+	if p.TaxpayerType == "enterprise" && strings.TrimSpace(p.LegalRepresentative) == "" {
+		return errors.New("doanh nghiệp phải có người đại diện pháp luật")
+	}
+	if p.TaxpayerType == "household" && p.HouseholdTaxMethod != "" && p.HouseholdTaxMethod != "non_taxable" && p.HouseholdTaxMethod != "revenue_percentage" && p.HouseholdTaxMethod != "taxable_income" {
+		return errors.New("householdTaxMethod không hợp lệ")
+	}
+	return nil
+}
+
+func validatePeriod(p domain.TaxPeriod) error {
+	if p.Label == "" || p.Year < 2000 || (p.Kind != "month" && p.Kind != "quarter") {
+		return errors.New("thông tin kỳ kê khai không hợp lệ")
+	}
+	if _, err := time.Parse(time.DateOnly, p.DueDate); err != nil {
+		return errors.New("dueDate phải có dạng YYYY-MM-DD")
+	}
+	if p.PaidAmount < 0 {
+		return errors.New("paidAmount không được âm")
+	}
+	return nil
+}
+
+func validateDeclaration(d domain.TaxDeclaration) error {
+	if d.ID == "" || d.FormCode == "" || d.SchemaVersion == "" {
+		return errors.New("thiếu mã tờ khai hoặc phiên bản schema")
+	}
+	if d.TaxType != "vat" && d.TaxType != "pit" && d.TaxType != "cit" {
+		return errors.New("taxType không hợp lệ")
+	}
+	for key, value := range d.Values {
+		if value < 0 {
+			return fmt.Errorf("chỉ tiêu %s không được âm", key)
+		}
+	}
+	return nil
+}
+
+func findPeriod(items []domain.TaxPeriod, id string) *domain.TaxPeriod {
+	for i := range items {
+		if items[i].ID == id {
+			return &items[i]
+		}
+	}
+	return nil
+}
+func filterTransactions(items []domain.Transaction, periodID string) []domain.Transaction {
+	out := make([]domain.Transaction, 0)
+	for _, item := range items {
+		if item.PeriodID == periodID {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+func prependAudit(db *domain.Database, at time.Time, action, detail string) {
+	db.Audit = append([]domain.AuditEntry{{ID: newID("audit"), At: at.UTC(), Action: action, Detail: detail}}, db.Audit...)
+}
+
+func newID(prefix string) string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return prefix + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return prefix + "-" + hex.EncodeToString(b)
+}
+
+func decode(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	if decoder.Decode(&struct{}{}) != nil {
+		return nil
+	}
+	return errors.New("request chỉ được chứa một JSON object")
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
+}
+func (s *Server) internal(w http.ResponseWriter, err error) {
+	s.logger.Error("request failed", "error", err)
+	writeError(w, http.StatusInternalServerError, "internal_error", "lỗi hệ thống")
+}
+
+func (s *Server) auth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		expected := "Bearer " + s.token
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(expected)) != 1 {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "thiếu hoặc sai access token")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+func (s *Server) cors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Origin") == s.allowedOrigin {
+			w.Header().Set("Access-Control-Allow-Origin", s.allowedOrigin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+func (s *Server) log(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		next.ServeHTTP(w, r)
+		s.logger.Info("http request", "method", r.Method, "path", r.URL.Path, "duration", time.Since(started))
+	})
+}
+func (s *Server) recover(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				s.logger.Error("panic recovered", "panic", recovered)
+				writeError(w, http.StatusInternalServerError, "internal_error", "lỗi hệ thống")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}

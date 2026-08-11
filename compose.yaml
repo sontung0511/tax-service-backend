@@ -1,0 +1,13 @@
+services:
+  tax-api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      CORS_ALLOWED_ORIGIN: http://localhost:3000
+      AUTH_TOKEN: mock-session-token
+    volumes:
+      - tax-data:/data
+
+volumes:
+  tax-data:
