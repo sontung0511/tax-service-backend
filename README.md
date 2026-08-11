@@ -1,14 +1,20 @@
 # Tax Service Backend
 
-Go API cho ứng dụng quản lý thuế hộ kinh doanh và doanh nghiệp. Service dùng `net/http`, tiền là `int64` VND, tax-engine versioned và repository interface. Bản MVP lưu JSON bằng ghi file nguyên tử; có thể thay bằng PostgreSQL mà không sửa handler.
+Go API cho ứng dụng quản lý thuế hộ kinh doanh và doanh nghiệp. Service dùng `net/http`, PostgreSQL qua `pgxpool`, tiền là `int64` VND và tax-engine versioned. Schema chuẩn hóa có khóa ngoại, constraint và index; migration chạy tự động khi khởi động.
 
 ## Chạy local
 
 ```bash
-make run
+make dev
 ```
 
-API chạy tại `http://localhost:8080`. Đăng nhập demo: `demo` / `demo123`.
+Lệnh trên chạy PostgreSQL bằng Docker Compose rồi mở API tại `http://localhost:8080`. Đăng nhập demo: `demo` / `demo123`.
+
+Kết nối mặc định: `postgres://taxapp:taxapp@localhost:55432/taxdb?sslmode=disable`. Có thể thay bằng biến `DATABASE_URL`.
+
+## Deploy Railway
+
+Tạo PostgreSQL service, sau đó khai báo `DATABASE_URL=${{Postgres.DATABASE_URL}}` cho backend service. File `railway.json` chạy `/tax-api migrate` trước mỗi deployment và kiểm tra `/healthz` trước khi chuyển traffic. Backend tự đọc biến `PORT` của Railway.
 
 ```bash
 curl -s http://localhost:8080/api/login \

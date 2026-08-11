@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: taxdb
+      POSTGRES_USER: taxapp
+      POSTGRES_PASSWORD: taxapp
+    ports:
+      - "55432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taxapp -d taxdb"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
   tax-api:
     build: .
     ports:
@@ -6,8 +22,10 @@ services:
     environment:
       CORS_ALLOWED_ORIGIN: http://localhost:3000
       AUTH_TOKEN: mock-session-token
-    volumes:
-      - tax-data:/data
+      DATABASE_URL: postgres://taxapp:taxapp@postgres:5432/taxdb?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
-  tax-data:
+  postgres-data:
