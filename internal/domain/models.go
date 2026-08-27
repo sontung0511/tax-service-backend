@@ -39,6 +39,7 @@ type Transaction struct {
 	Description       string `json:"description"`
 	InvoiceNo         string `json:"invoiceNo"`
 	Amount            Money  `json:"amount"`
+	VATAmount         Money  `json:"vatAmount"`
 	RevenueCategory   string `json:"revenueCategory"`
 	DocumentNo        string `json:"documentNo,omitempty"`
 	PaymentStatus     string `json:"paymentStatus,omitempty"`

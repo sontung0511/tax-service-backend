@@ -69,6 +69,7 @@ func New(repo repository.Repository, cfg Config) http.Handler {
 	protected.HandleFunc("POST /api/tax-periods/{id}/lock", s.lockPeriod)
 	protected.HandleFunc("GET /api/transactions", s.transactions)
 	protected.HandleFunc("POST /api/transactions", s.transactions)
+	protected.HandleFunc("PUT /api/transactions/{id}", s.updateTransaction)
 	protected.HandleFunc("DELETE /api/transactions/{id}", s.deleteTransaction)
 	protected.HandleFunc("POST /api/calculate", s.calculate)
 	protected.HandleFunc("POST /api/imports", s.importTransactions)
@@ -326,6 +327,66 @@ func (s *Server) deleteTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) updateTransaction(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var item domain.Transaction
+	if err := decode(w, r, &item); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if item.ID != "" && item.ID != id {
+		writeError(w, http.StatusBadRequest, "id_mismatch", "mã giao dịch trong đường dẫn và dữ liệu không khớp")
+		return
+	}
+	item.ID = id
+	err := s.repo.Update(r.Context(), func(db *domain.Database) error {
+		index := -1
+		for i := range db.Transactions {
+			if db.Transactions[i].ID == id {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			return errNotFound
+		}
+		currentPeriod := findPeriod(db.Periods, db.Transactions[index].PeriodID)
+		targetPeriod := findPeriod(db.Periods, item.PeriodID)
+		if targetPeriod == nil {
+			return errNotFound
+		}
+		if (currentPeriod != nil && currentPeriod.LockedAt != nil) || targetPeriod.LockedAt != nil {
+			return errConflict
+		}
+		candidate := append([]domain.Transaction{}, db.Transactions...)
+		candidate[index] = item
+		if issues := validation.Transactions(candidate); len(issues) > 0 {
+			return validationError{issues}
+		}
+		db.Transactions[index] = item
+		prependAudit(db, s.now(), "Cập nhật giao dịch", fmt.Sprintf("%s · ngày %s · %d VND", item.Description, item.Date, item.Amount))
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "transaction_or_period_not_found", "không tìm thấy giao dịch hoặc kỳ kê khai")
+		return
+	}
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "period_locked", "kỳ kê khai đã khóa")
+		return
+	}
+	var ve validationError
+	if errors.As(err, &ve) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": map[string]any{"code": "validation_error", "message": "giao dịch không hợp lệ", "issues": ve.issues}})
+		return
+	}
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
 }
 
 func (s *Server) calculate(w http.ResponseWriter, r *http.Request) {

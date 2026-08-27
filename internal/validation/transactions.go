@@ -20,6 +20,9 @@ func Transactions(items []domain.Transaction) []Issue {
 		if item.Amount <= 0 {
 			issues = append(issues, Issue{item.ID, "invalid", "số tiền phải là số nguyên VND dương"})
 		}
+		if item.VATAmount < 0 {
+			issues = append(issues, Issue{item.ID, "invalid", "tiền thuế GTGT phải là số nguyên VND không âm"})
+		}
 		if _, err := time.Parse(time.DateOnly, item.Date); err != nil {
 			issues = append(issues, Issue{item.ID, "invalid", "ngày phải có dạng YYYY-MM-DD"})
 		}

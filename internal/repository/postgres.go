@@ -209,7 +209,7 @@ func loadDatabase(ctx context.Context, q querier) (domain.Database, error) {
 	}
 	rows.Close()
 
-	rows, err = q.Query(ctx, `SELECT id, period_id, transaction_date, type, description, invoice_no, amount, revenue_category,
+	rows, err = q.Query(ctx, `SELECT id, period_id, transaction_date, type, description, invoice_no, amount, vat_amount, revenue_category,
 		COALESCE(document_no,''), COALESCE(payment_status,''), outstanding_amount FROM transactions ORDER BY transaction_date DESC, created_at DESC`)
 	if err != nil {
 		return db, err
@@ -217,7 +217,7 @@ func loadDatabase(ctx context.Context, q querier) (domain.Database, error) {
 	for rows.Next() {
 		var item domain.Transaction
 		var date time.Time
-		if err := rows.Scan(&item.ID, &item.PeriodID, &date, &item.Type, &item.Description, &item.InvoiceNo, &item.Amount, &item.RevenueCategory, &item.DocumentNo, &item.PaymentStatus, &item.OutstandingAmount); err != nil {
+		if err := rows.Scan(&item.ID, &item.PeriodID, &date, &item.Type, &item.Description, &item.InvoiceNo, &item.Amount, &item.VATAmount, &item.RevenueCategory, &item.DocumentNo, &item.PaymentStatus, &item.OutstandingAmount); err != nil {
 			rows.Close()
 			return db, err
 		}
@@ -302,8 +302,8 @@ func syncDatabase(ctx context.Context, tx pgx.Tx, db domain.Database) error {
 	transactionIDs := make([]string, 0, len(db.Transactions))
 	for _, item := range db.Transactions {
 		transactionIDs = append(transactionIDs, item.ID)
-		_, err := tx.Exec(ctx, `INSERT INTO transactions (id,period_id,transaction_date,type,description,invoice_no,amount,revenue_category,document_no,payment_status,outstanding_amount) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,NULLIF($9,''),NULLIF($10,''),$11)
-			ON CONFLICT (id) DO UPDATE SET period_id=EXCLUDED.period_id,transaction_date=EXCLUDED.transaction_date,type=EXCLUDED.type,description=EXCLUDED.description,invoice_no=EXCLUDED.invoice_no,amount=EXCLUDED.amount,revenue_category=EXCLUDED.revenue_category,document_no=EXCLUDED.document_no,payment_status=EXCLUDED.payment_status,outstanding_amount=EXCLUDED.outstanding_amount,updated_at=NOW()`, item.ID, item.PeriodID, item.Date, item.Type, item.Description, item.InvoiceNo, item.Amount, item.RevenueCategory, item.DocumentNo, item.PaymentStatus, item.OutstandingAmount)
+		_, err := tx.Exec(ctx, `INSERT INTO transactions (id,period_id,transaction_date,type,description,invoice_no,amount,vat_amount,revenue_category,document_no,payment_status,outstanding_amount) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,NULLIF($10,''),NULLIF($11,''),$12)
+			ON CONFLICT (id) DO UPDATE SET period_id=EXCLUDED.period_id,transaction_date=EXCLUDED.transaction_date,type=EXCLUDED.type,description=EXCLUDED.description,invoice_no=EXCLUDED.invoice_no,amount=EXCLUDED.amount,vat_amount=EXCLUDED.vat_amount,revenue_category=EXCLUDED.revenue_category,document_no=EXCLUDED.document_no,payment_status=EXCLUDED.payment_status,outstanding_amount=EXCLUDED.outstanding_amount,updated_at=NOW()`, item.ID, item.PeriodID, item.Date, item.Type, item.Description, item.InvoiceNo, item.Amount, item.VATAmount, item.RevenueCategory, item.DocumentNo, item.PaymentStatus, item.OutstandingAmount)
 		if err != nil {
 			return fmt.Errorf("save transaction %s: %w", item.ID, err)
 		}

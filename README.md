@@ -33,6 +33,7 @@ Các API ngoài `/healthz` và `/api/login` yêu cầu `Authorization: Bearer mo
 | GET/POST | `/api/tax-periods` | Danh sách/tạo kỳ |
 | POST | `/api/tax-periods/{id}/lock` | Khóa kỳ và lưu snapshot |
 | GET/POST | `/api/transactions` | Giao dịch; hỗ trợ `?periodId=` |
+| PUT | `/api/transactions/{id}` | Cập nhật giao dịch, gồm ngày và tiền thuế GTGT |
 | DELETE | `/api/transactions/{id}` | Xóa giao dịch khi kỳ chưa khóa |
 | POST | `/api/imports` | Import giao dịch đã preview |
 | POST | `/api/calculate` | Tính GTGT/TNCN hộ kinh doanh |

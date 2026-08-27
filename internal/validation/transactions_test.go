@@ -18,7 +18,7 @@ func TestTransactionsDetectsDuplicate(t *testing.T) {
 }
 
 func TestTransactionsReportsInvalidFields(t *testing.T) {
-	issues := Transactions([]domain.Transaction{{ID: "bad", Date: "not-a-date", Type: "wrong", Amount: -1}})
+	issues := Transactions([]domain.Transaction{{ID: "bad", Date: "not-a-date", Type: "wrong", Amount: -1, VATAmount: -1}})
 	if len(issues) < 4 {
 		t.Fatalf("issues = %d, want at least 4: %+v", len(issues), issues)
 	}

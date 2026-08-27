@@ -119,3 +119,29 @@ func TestDeleteTransaction(t *testing.T) {
 		t.Fatalf("items after delete = %d, want 0", len(items))
 	}
 }
+
+func TestUpdateTransactionDateAndVAT(t *testing.T) {
+	handler := newTestServer(t)
+	transaction := map[string]any{"id": "to-update", "periodId": "2026-q3", "date": "2026-08-11", "type": "revenue", "description": "Sale", "invoiceNo": "HD-UPDATE", "amount": 1000, "vatAmount": 80, "revenueCategory": "distribution"}
+	created := request(t, handler, http.MethodPost, "/api/transactions", transaction, true)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status = %d body=%s", created.Code, created.Body.String())
+	}
+	transaction["date"] = "2026-08-12"
+	transaction["vatAmount"] = 100
+	updated := request(t, handler, http.MethodPut, "/api/transactions/to-update", transaction, true)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update status = %d body=%s", updated.Code, updated.Body.String())
+	}
+	listed := request(t, handler, http.MethodGet, "/api/transactions?periodId=2026-q3", nil, true)
+	var items []struct {
+		Date      string `json:"date"`
+		VATAmount int64  `json:"vatAmount"`
+	}
+	if err := json.Unmarshal(listed.Body.Bytes(), &items); err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Date != "2026-08-12" || items[0].VATAmount != 100 {
+		t.Fatalf("unexpected transactions after update: %+v", items)
+	}
+}
