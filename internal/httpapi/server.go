@@ -71,6 +71,12 @@ func New(repo repository.Repository, cfg Config) http.Handler {
 	protected.HandleFunc("POST /api/transactions", s.transactions)
 	protected.HandleFunc("PUT /api/transactions/{id}", s.updateTransaction)
 	protected.HandleFunc("DELETE /api/transactions/{id}", s.deleteTransaction)
+	protected.HandleFunc("GET /api/counterparties", s.counterparties)
+	protected.HandleFunc("GET /api/accounts", s.accounts)
+	protected.HandleFunc("GET /api/counterparties/{code}", s.counterparty)
+	protected.HandleFunc("PUT /api/counterparties/{code}", s.counterparty)
+	protected.HandleFunc("POST /api/cash-receipts", s.cashReceipts)
+	protected.HandleFunc("PUT /api/cash-receipts/{id}", s.updateCashReceipt)
 	protected.HandleFunc("POST /api/calculate", s.calculate)
 	protected.HandleFunc("POST /api/imports", s.importTransactions)
 	protected.HandleFunc("GET /api/exports", s.exportData)
@@ -90,6 +96,22 @@ func New(repo repository.Repository, cfg Config) http.Handler {
 		s.auth(protected).ServeHTTP(w, r)
 	})
 	return s.recover(s.cors(s.log(root)))
+}
+
+func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
+	db, err := s.repo.Snapshot(r.Context())
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
+	items := make([]domain.Account, 0, len(db.Accounts))
+	for _, item := range db.Accounts {
+		if item.IsActive && (query == "" || strings.Contains(strings.ToLower(item.Code), query) || strings.Contains(strings.ToLower(item.Name), query)) {
+			items = append(items, item)
+		}
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
@@ -295,6 +317,184 @@ func (s *Server) transactions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) counterparties(w http.ResponseWriter, r *http.Request) {
+	db, err := s.repo.Snapshot(r.Context())
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
+	items := make([]domain.Counterparty, 0, len(db.Counterparties))
+	for _, item := range db.Counterparties {
+		if query == "" || strings.Contains(strings.ToLower(item.Code), query) || strings.Contains(strings.ToLower(item.Name), query) {
+			items = append(items, item)
+		}
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) counterparty(w http.ResponseWriter, r *http.Request) {
+	code := strings.TrimSpace(r.PathValue("code"))
+	if r.Method == http.MethodGet {
+		db, err := s.repo.Snapshot(r.Context())
+		if err != nil {
+			s.internal(w, err)
+			return
+		}
+		for _, item := range db.Counterparties {
+			if item.Code == code {
+				writeJSON(w, http.StatusOK, item)
+				return
+			}
+		}
+		writeError(w, http.StatusNotFound, "counterparty_not_found", "không tìm thấy đối tượng")
+		return
+	}
+
+	var input domain.Counterparty
+	if err := decode(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if input.Code != "" && input.Code != code {
+		writeError(w, http.StatusBadRequest, "id_mismatch", "mã đối tượng trong URL và dữ liệu không khớp")
+		return
+	}
+	input.Code = code
+	if err := validateCounterparty(input); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		return
+	}
+	if err := s.repo.Update(r.Context(), func(db *domain.Database) error {
+		upsertCounterparty(&db.Counterparties, input)
+		prependAudit(db, s.now(), "Cập nhật danh mục đối tượng", input.Code+" · "+input.Name)
+		return nil
+	}); err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, input)
+}
+
+func (s *Server) cashReceipts(w http.ResponseWriter, r *http.Request) {
+	var input domain.CashReceipt
+	if err := decode(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if err := validateCashReceipt(input); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		return
+	}
+	item := receiptTransaction(newID("tx"), input)
+	err := s.repo.Update(r.Context(), func(db *domain.Database) error {
+		period := findPeriod(db.Periods, item.PeriodID)
+		if period == nil {
+			return errNotFound
+		}
+		if period.LockedAt != nil {
+			return errConflict
+		}
+		candidate := append(append([]domain.Transaction{}, db.Transactions...), item)
+		if issues := validation.Transactions(candidate); len(issues) > 0 {
+			return validationError{issues}
+		}
+		if input.SaveCounterparty {
+			upsertCounterparty(&db.Counterparties, domain.Counterparty{Code: item.CounterpartyCode, Name: item.CounterpartyName, TaxCode: item.CounterpartyTaxCode, Address: item.CounterpartyAddress})
+		}
+		db.Transactions = append([]domain.Transaction{item}, db.Transactions...)
+		prependAudit(db, s.now(), "Lập phiếu thu tiền mặt", fmt.Sprintf("%s · %d VND", item.DocumentNo, item.Amount))
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "period_not_found", "không tìm thấy kỳ kê khai")
+		return
+	}
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "period_locked", "kỳ kê khai đã khóa")
+		return
+	}
+	var ve validationError
+	if errors.As(err, &ve) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": map[string]any{"code": "validation_error", "message": "phiếu thu không hợp lệ", "issues": ve.issues}})
+		return
+	}
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) updateCashReceipt(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var input domain.CashReceipt
+	if err := decode(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if input.ID != "" && input.ID != id {
+		writeError(w, http.StatusBadRequest, "id_mismatch", "mã phiếu thu trong URL và dữ liệu không khớp")
+		return
+	}
+	if err := validateCashReceipt(input); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		return
+	}
+	item := receiptTransaction(id, input)
+	err := s.repo.Update(r.Context(), func(db *domain.Database) error {
+		for index, current := range db.Transactions {
+			if current.ID != id {
+				continue
+			}
+			if current.VoucherType != "cash_receipt" {
+				return errNotFound
+			}
+			period := findPeriod(db.Periods, current.PeriodID)
+			target := findPeriod(db.Periods, item.PeriodID)
+			if target == nil {
+				return errNotFound
+			}
+			if (period != nil && period.LockedAt != nil) || target.LockedAt != nil {
+				return errConflict
+			}
+			if !hasActiveAccount(db.Accounts, item.CashReceipt.DebitAccount) || !hasActiveAccount(db.Accounts, item.CashReceipt.CreditAccount) {
+				return validationError{[]validation.Issue{{TransactionID: item.ID, Code: "invalid_account", Message: "tài khoản Nợ/Có không tồn tại hoặc đã ngừng sử dụng"}}}
+			}
+			candidate := append([]domain.Transaction{}, db.Transactions...)
+			candidate[index] = item
+			if issues := validation.Transactions(candidate); len(issues) > 0 {
+				return validationError{issues}
+			}
+			if input.SaveCounterparty {
+				upsertCounterparty(&db.Counterparties, domain.Counterparty{Code: item.CounterpartyCode, Name: item.CounterpartyName, TaxCode: item.CounterpartyTaxCode, Address: item.CounterpartyAddress})
+			}
+			db.Transactions[index] = item
+			prependAudit(db, s.now(), "Cập nhật phiếu thu tiền mặt", item.DocumentNo)
+			return nil
+		}
+		return errNotFound
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "cash_receipt_not_found", "không tìm thấy phiếu thu")
+		return
+	}
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "period_locked", "kỳ kê khai đã khóa")
+		return
+	}
+	var ve validationError
+	if errors.As(err, &ve) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": map[string]any{"code": "validation_error", "message": "phiếu thu không hợp lệ", "issues": ve.issues}})
+		return
+	}
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
 }
 
 func (s *Server) deleteTransaction(w http.ResponseWriter, r *http.Request) {
@@ -614,6 +814,103 @@ func validateDeclaration(d domain.TaxDeclaration) error {
 	return nil
 }
 
+func validateCounterparty(item domain.Counterparty) error {
+	if code := strings.TrimSpace(item.Code); code == "" || len(code) > 64 {
+		return errors.New("mã đối tượng phải có từ 1 đến 64 ký tự")
+	}
+	if name := strings.TrimSpace(item.Name); name == "" || len(name) > 255 {
+		return errors.New("tên đối tượng phải có từ 1 đến 255 ký tự")
+	}
+	if len(strings.TrimSpace(item.TaxCode)) > 32 {
+		return errors.New("mã số thuế không được quá 32 ký tự")
+	}
+	if len(strings.TrimSpace(item.Address)) > 500 {
+		return errors.New("địa chỉ không được quá 500 ký tự")
+	}
+	return nil
+}
+
+func validateCashReceipt(input domain.CashReceipt) error {
+	if input.Status != "draft" && input.Status != "saved" {
+		return errors.New("trạng thái phiếu thu không hợp lệ")
+	}
+	if strings.TrimSpace(input.PeriodID) == "" || strings.TrimSpace(input.ReceiptNo) == "" || strings.TrimSpace(input.Description) == "" || strings.TrimSpace(input.CounterpartyName) == "" {
+		return errors.New("thiếu kỳ kê khai, số phiếu thu, người nộp hoặc lý do thu")
+	}
+	if _, err := time.Parse(time.DateOnly, input.VoucherDate); err != nil {
+		return errors.New("ngày chứng từ phải có dạng YYYY-MM-DD")
+	}
+	if _, err := time.Parse(time.DateOnly, input.AccountingDate); err != nil {
+		return errors.New("ngày hạch toán phải có dạng YYYY-MM-DD")
+	}
+	if !validAccount(input.DebitAccount) || !validAccount(input.CreditAccount) {
+		return errors.New("tài khoản Nợ/Có phải gồm 3 đến 10 chữ số")
+	}
+	if input.Amount <= 0 || input.ConvertedAmount <= 0 {
+		return errors.New("số tiền và số tiền quy đổi phải là số nguyên VND dương")
+	}
+	if strings.TrimSpace(input.Currency) == "" || input.ExchangeRate <= 0 {
+		return errors.New("loại tiền hoặc tỷ giá không hợp lệ")
+	}
+	if input.InvoiceDate != "" {
+		if _, err := time.Parse(time.DateOnly, input.InvoiceDate); err != nil {
+			return errors.New("ngày hóa đơn phải có dạng YYYY-MM-DD")
+		}
+	}
+	if len(input.Attachments) > 5 {
+		return errors.New("chỉ được đính kèm tối đa 5 tệp")
+	}
+	var attachmentBytes int64
+	for _, attachment := range input.Attachments {
+		if strings.TrimSpace(attachment.Name) == "" || attachment.Size < 0 || attachment.Size > 5<<20 {
+			return errors.New("tệp đính kèm không hợp lệ hoặc vượt quá 5 MB")
+		}
+		attachmentBytes += attachment.Size
+	}
+	if attachmentBytes > 5<<20 {
+		return errors.New("tổng dung lượng tệp đính kèm vượt quá 5 MB")
+	}
+	if input.Status == "saved" && strings.TrimSpace(input.CounterpartyCode) == "" {
+		return errors.New("thiếu mã đối tượng")
+	}
+	if input.Status == "draft" && strings.TrimSpace(input.CounterpartyCode) == "" {
+		input.CounterpartyCode = "DRAFT"
+	}
+	if input.Status == "draft" && input.RevenueCategory == "" {
+		input.RevenueCategory = "other"
+	}
+	if input.Status == "draft" && input.Amount <= 0 {
+		return errors.New("số tiền thu phải lớn hơn 0")
+	}
+	if input.Status == "draft" && input.ConvertedAmount <= 0 {
+		return errors.New("số tiền quy đổi phải lớn hơn 0")
+	}
+	if input.RevenueCategory != "distribution" && input.RevenueCategory != "services" && input.RevenueCategory != "production" && input.RevenueCategory != "other" {
+		return errors.New("nhóm ngành không hợp lệ")
+	}
+	if err := validateCounterparty(domain.Counterparty{Code: input.CounterpartyCode, Name: input.CounterpartyName, TaxCode: input.CounterpartyTaxCode, Address: input.CounterpartyAddress}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validAccount(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 3 || len(value) > 10 {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func receiptTransaction(id string, input domain.CashReceipt) domain.Transaction {
+	return domain.Transaction{ID: id, PeriodID: input.PeriodID, Date: input.VoucherDate, Type: "revenue", Description: strings.TrimSpace(input.Description), InvoiceNo: strings.TrimSpace(input.ReceiptNo), DocumentNo: strings.TrimSpace(input.ReceiptNo), Amount: input.ConvertedAmount, VATAmount: 0, RevenueCategory: input.RevenueCategory, PaymentStatus: "paid", VoucherType: "cash_receipt", CounterpartyCode: strings.TrimSpace(input.CounterpartyCode), CounterpartyName: strings.TrimSpace(input.CounterpartyName), CounterpartyTaxCode: strings.TrimSpace(input.CounterpartyTaxCode), CounterpartyAddress: strings.TrimSpace(input.CounterpartyAddress), CashReceipt: &domain.CashReceiptData{VoucherDate: input.VoucherDate, AccountingDate: input.AccountingDate, Status: input.Status, ContactName: input.ContactName, DebitAccount: input.DebitAccount, CreditAccount: input.CreditAccount, Currency: input.Currency, ExchangeRate: input.ExchangeRate, ConvertedAmount: input.ConvertedAmount, InvoiceNo: input.InvoiceNo, InvoiceDate: input.InvoiceDate, CaseCode: input.CaseCode, Collector: input.Collector, Note: input.Note, Attachments: input.Attachments}}
+}
+
 func findPeriod(items []domain.TaxPeriod, id string) *domain.TaxPeriod {
 	for i := range items {
 		if items[i].ID == id {
@@ -621,6 +918,25 @@ func findPeriod(items []domain.TaxPeriod, id string) *domain.TaxPeriod {
 		}
 	}
 	return nil
+}
+
+func upsertCounterparty(items *[]domain.Counterparty, input domain.Counterparty) {
+	for i := range *items {
+		if (*items)[i].Code == input.Code {
+			(*items)[i] = input
+			return
+		}
+	}
+	*items = append(*items, input)
+}
+
+func hasActiveAccount(items []domain.Account, code string) bool {
+	for _, item := range items {
+		if item.Code == code && item.IsActive {
+			return true
+		}
+	}
+	return false
 }
 func filterTransactions(items []domain.Transaction, periodID string) []domain.Transaction {
 	out := make([]domain.Transaction, 0)

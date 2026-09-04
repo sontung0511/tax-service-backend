@@ -145,3 +145,73 @@ func TestUpdateTransactionDateAndVAT(t *testing.T) {
 		t.Fatalf("unexpected transactions after update: %+v", items)
 	}
 }
+
+func TestCashReceiptLoadsAndOptionallyUpdatesCounterparty(t *testing.T) {
+	handler := newTestServer(t)
+	lookup := request(t, handler, http.MethodGet, "/api/counterparties/KH-001", nil, true)
+	if lookup.Code != http.StatusOK {
+		t.Fatalf("lookup status = %d body=%s", lookup.Code, lookup.Body.String())
+	}
+
+	receipt := map[string]any{
+		"periodId": "2026-q3", "voucherDate": "2026-08-11", "accountingDate": "2026-08-11", "status": "saved", "receiptNo": "PT-0001", "counterpartyCode": "KH-001",
+		"counterpartyName": "Công ty TNHH Thương mại Minh Long", "counterpartyTaxCode": "0312345678", "counterpartyAddress": "99 Lê Lợi, Phường Sài Gòn, TP.HCM",
+		"description": "Thu tiền bán hàng", "debitAccount": "1111", "creditAccount": "511", "currency": "VND", "exchangeRate": 1, "convertedAmount": 1500000, "invoiceNo": "", "invoiceDate": "", "caseCode": "", "collector": "", "note": "", "attachments": []any{}, "amount": 1500000, "revenueCategory": "distribution", "saveCounterparty": true,
+	}
+	created := request(t, handler, http.MethodPost, "/api/cash-receipts", receipt, true)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create cash receipt status = %d body=%s", created.Code, created.Body.String())
+	}
+	var item struct {
+		VoucherType         string `json:"voucherType"`
+		CounterpartyAddress string `json:"counterpartyAddress"`
+		Type                string `json:"type"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if item.VoucherType != "cash_receipt" || item.Type != "revenue" || item.CounterpartyAddress != receipt["counterpartyAddress"] {
+		t.Fatalf("unexpected cash receipt: %+v", item)
+	}
+
+	updated := request(t, handler, http.MethodGet, "/api/counterparties/KH-001", nil, true)
+	var counterparty struct {
+		Address string `json:"address"`
+	}
+	if err := json.Unmarshal(updated.Body.Bytes(), &counterparty); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Code != http.StatusOK || counterparty.Address != receipt["counterpartyAddress"] {
+		t.Fatalf("counterparty was not updated: status=%d body=%s", updated.Code, updated.Body.String())
+	}
+}
+
+func TestCashReceiptValidatesAndCounterpartyNotFound(t *testing.T) {
+	handler := newTestServer(t)
+	notFound := request(t, handler, http.MethodGet, "/api/counterparties/UNKNOWN", nil, true)
+	if notFound.Code != http.StatusNotFound {
+		t.Fatalf("not found status = %d body=%s", notFound.Code, notFound.Body.String())
+	}
+	invalid := request(t, handler, http.MethodPost, "/api/cash-receipts", map[string]any{
+		"periodId": "2026-q3", "voucherDate": "2026-08-11", "accountingDate": "2026-08-11", "status": "saved", "receiptNo": "", "counterpartyCode": "KH-003", "counterpartyName": "Khách mới", "description": "Thu tiền", "debitAccount": "1111", "creditAccount": "511", "currency": "VND", "exchangeRate": 1, "convertedAmount": 0, "invoiceNo": "", "invoiceDate": "", "caseCode": "", "collector": "", "note": "", "attachments": []any{}, "amount": 0, "revenueCategory": "distribution",
+	}, true)
+	if invalid.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid cash receipt status = %d body=%s", invalid.Code, invalid.Body.String())
+	}
+}
+
+func TestUpdateCounterparty(t *testing.T) {
+	handler := newTestServer(t)
+	updated := request(t, handler, http.MethodPut, "/api/counterparties/KH-001", map[string]string{
+		"code": "KH-001", "name": "Công ty Minh Long cập nhật", "taxCode": "0312345678", "address": "123 Pasteur, TP.HCM",
+	}, true)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update counterparty status = %d body=%s", updated.Code, updated.Body.String())
+	}
+	invalid := request(t, handler, http.MethodPut, "/api/counterparties/KH-001", map[string]string{
+		"code": "KH-002", "name": "Sai mã", "address": "TP.HCM",
+	}, true)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("mismatched counterparty status = %d body=%s", invalid.Code, invalid.Body.String())
+	}
+}

@@ -32,18 +32,94 @@ type TaxPeriod struct {
 }
 
 type Transaction struct {
-	ID                string `json:"id"`
-	PeriodID          string `json:"periodId"`
-	Date              string `json:"date"`
-	Type              string `json:"type"`
-	Description       string `json:"description"`
-	InvoiceNo         string `json:"invoiceNo"`
-	Amount            Money  `json:"amount"`
-	VATAmount         Money  `json:"vatAmount"`
-	RevenueCategory   string `json:"revenueCategory"`
-	DocumentNo        string `json:"documentNo,omitempty"`
-	PaymentStatus     string `json:"paymentStatus,omitempty"`
-	OutstandingAmount Money  `json:"outstandingAmount,omitempty"`
+	ID                  string           `json:"id"`
+	PeriodID            string           `json:"periodId"`
+	Date                string           `json:"date"`
+	Type                string           `json:"type"`
+	Description         string           `json:"description"`
+	InvoiceNo           string           `json:"invoiceNo"`
+	Amount              Money            `json:"amount"`
+	VATAmount           Money            `json:"vatAmount"`
+	RevenueCategory     string           `json:"revenueCategory"`
+	DocumentNo          string           `json:"documentNo,omitempty"`
+	PaymentStatus       string           `json:"paymentStatus,omitempty"`
+	OutstandingAmount   Money            `json:"outstandingAmount,omitempty"`
+	VoucherType         string           `json:"voucherType,omitempty"`
+	CounterpartyCode    string           `json:"counterpartyCode,omitempty"`
+	CounterpartyName    string           `json:"counterpartyName,omitempty"`
+	CounterpartyTaxCode string           `json:"counterpartyTaxCode,omitempty"`
+	CounterpartyAddress string           `json:"counterpartyAddress,omitempty"`
+	CashReceipt         *CashReceiptData `json:"cashReceipt,omitempty"`
+}
+
+// Counterparty is a reusable customer or supplier record used on vouchers.
+type Counterparty struct {
+	Code    string `json:"code"`
+	Name    string `json:"name"`
+	TaxCode string `json:"taxCode"`
+	Address string `json:"address"`
+}
+
+type Account struct {
+	Code       string `json:"code"`
+	Name       string `json:"name"`
+	ParentCode string `json:"parentCode,omitempty"`
+	IsActive   bool   `json:"isActive"`
+}
+
+// CashReceipt contains the data required to create a cash receipt voucher.
+type CashReceipt struct {
+	ID                  string              `json:"id,omitempty"`
+	PeriodID            string              `json:"periodId"`
+	VoucherDate         string              `json:"voucherDate"`
+	AccountingDate      string              `json:"accountingDate"`
+	Status              string              `json:"status"`
+	ReceiptNo           string              `json:"receiptNo"`
+	CounterpartyCode    string              `json:"counterpartyCode"`
+	CounterpartyName    string              `json:"counterpartyName"`
+	CounterpartyTaxCode string              `json:"counterpartyTaxCode"`
+	CounterpartyAddress string              `json:"counterpartyAddress"`
+	Description         string              `json:"description"`
+	ContactName         string              `json:"contactName"`
+	DebitAccount        string              `json:"debitAccount"`
+	CreditAccount       string              `json:"creditAccount"`
+	Amount              Money               `json:"amount"`
+	Currency            string              `json:"currency"`
+	ExchangeRate        float64             `json:"exchangeRate"`
+	ConvertedAmount     Money               `json:"convertedAmount"`
+	RevenueCategory     string              `json:"revenueCategory"`
+	InvoiceNo           string              `json:"invoiceNo"`
+	InvoiceDate         string              `json:"invoiceDate"`
+	CaseCode            string              `json:"caseCode"`
+	Collector           string              `json:"collector"`
+	Note                string              `json:"note"`
+	Attachments         []ReceiptAttachment `json:"attachments"`
+	SaveCounterparty    bool                `json:"saveCounterparty"`
+}
+
+type ReceiptAttachment struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+	Size int64  `json:"size"`
+	Data string `json:"data"`
+}
+
+type CashReceiptData struct {
+	VoucherDate     string              `json:"voucherDate"`
+	AccountingDate  string              `json:"accountingDate"`
+	Status          string              `json:"status"`
+	ContactName     string              `json:"contactName"`
+	DebitAccount    string              `json:"debitAccount"`
+	CreditAccount   string              `json:"creditAccount"`
+	Currency        string              `json:"currency"`
+	ExchangeRate    float64             `json:"exchangeRate"`
+	ConvertedAmount Money               `json:"convertedAmount"`
+	InvoiceNo       string              `json:"invoiceNo"`
+	InvoiceDate     string              `json:"invoiceDate"`
+	CaseCode        string              `json:"caseCode"`
+	Collector       string              `json:"collector"`
+	Note            string              `json:"note"`
+	Attachments     []ReceiptAttachment `json:"attachments"`
 }
 
 type TaxLine struct {
@@ -94,9 +170,11 @@ type AuditEntry struct {
 }
 
 type Database struct {
-	Profile      BusinessProfile  `json:"profile"`
-	Periods      []TaxPeriod      `json:"periods"`
-	Transactions []Transaction    `json:"transactions"`
-	Declarations []TaxDeclaration `json:"declarations"`
-	Audit        []AuditEntry     `json:"audit"`
+	Profile        BusinessProfile  `json:"profile"`
+	Periods        []TaxPeriod      `json:"periods"`
+	Transactions   []Transaction    `json:"transactions"`
+	Counterparties []Counterparty   `json:"counterparties"`
+	Accounts       []Account        `json:"accounts"`
+	Declarations   []TaxDeclaration `json:"declarations"`
+	Audit          []AuditEntry     `json:"audit"`
 }

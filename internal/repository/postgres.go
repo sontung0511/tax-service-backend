@@ -179,8 +179,43 @@ func loadDatabase(ctx context.Context, q querier) (domain.Database, error) {
 	if err != nil {
 		return db, fmt.Errorf("load profile: %w", err)
 	}
+	rows, err := q.Query(ctx, `SELECT code, name, COALESCE(parent_code,''), is_active FROM accounts ORDER BY code`)
+	if err != nil {
+		return db, err
+	}
+	for rows.Next() {
+		var item domain.Account
+		if err := rows.Scan(&item.Code, &item.Name, &item.ParentCode, &item.IsActive); err != nil {
+			rows.Close()
+			return db, err
+		}
+		db.Accounts = append(db.Accounts, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return db, err
+	}
+	rows.Close()
 
-	rows, err := q.Query(ctx, `SELECT id, label, year, kind, status, due_date, paid_amount, locked_at, tax_snapshot FROM tax_periods ORDER BY year DESC, due_date DESC`)
+	rows, err = q.Query(ctx, `SELECT code, name, tax_code, address FROM counterparties ORDER BY code`)
+	if err != nil {
+		return db, err
+	}
+	for rows.Next() {
+		var item domain.Counterparty
+		if err := rows.Scan(&item.Code, &item.Name, &item.TaxCode, &item.Address); err != nil {
+			rows.Close()
+			return db, err
+		}
+		db.Counterparties = append(db.Counterparties, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return db, err
+	}
+	rows.Close()
+
+	rows, err = q.Query(ctx, `SELECT id, label, year, kind, status, due_date, paid_amount, locked_at, tax_snapshot FROM tax_periods ORDER BY year DESC, due_date DESC`)
 	if err != nil {
 		return db, err
 	}
@@ -210,18 +245,27 @@ func loadDatabase(ctx context.Context, q querier) (domain.Database, error) {
 	rows.Close()
 
 	rows, err = q.Query(ctx, `SELECT id, period_id, transaction_date, type, description, invoice_no, amount, vat_amount, revenue_category,
-		COALESCE(document_no,''), COALESCE(payment_status,''), outstanding_amount FROM transactions ORDER BY transaction_date DESC, created_at DESC`)
+		COALESCE(document_no,''), COALESCE(payment_status,''), outstanding_amount, COALESCE(voucher_type,''), COALESCE(counterparty_code,''), COALESCE(counterparty_name,''), COALESCE(counterparty_tax_code,''), COALESCE(counterparty_address,''), cash_receipt_data FROM transactions ORDER BY transaction_date DESC, created_at DESC`)
 	if err != nil {
 		return db, err
 	}
 	for rows.Next() {
 		var item domain.Transaction
 		var date time.Time
-		if err := rows.Scan(&item.ID, &item.PeriodID, &date, &item.Type, &item.Description, &item.InvoiceNo, &item.Amount, &item.VATAmount, &item.RevenueCategory, &item.DocumentNo, &item.PaymentStatus, &item.OutstandingAmount); err != nil {
+		var receipt []byte
+		if err := rows.Scan(&item.ID, &item.PeriodID, &date, &item.Type, &item.Description, &item.InvoiceNo, &item.Amount, &item.VATAmount, &item.RevenueCategory, &item.DocumentNo, &item.PaymentStatus, &item.OutstandingAmount, &item.VoucherType, &item.CounterpartyCode, &item.CounterpartyName, &item.CounterpartyTaxCode, &item.CounterpartyAddress, &receipt); err != nil {
 			rows.Close()
 			return db, err
 		}
 		item.Date = date.Format(time.DateOnly)
+		if len(receipt) > 0 {
+			var details domain.CashReceiptData
+			if err := json.Unmarshal(receipt, &details); err != nil {
+				rows.Close()
+				return db, err
+			}
+			item.CashReceipt = &details
+		}
 		db.Transactions = append(db.Transactions, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -281,6 +325,25 @@ func syncDatabase(ctx context.Context, tx pgx.Tx, db domain.Database) error {
 	if err != nil {
 		return fmt.Errorf("save profile: %w", err)
 	}
+	for _, item := range db.Accounts {
+		_, err := tx.Exec(ctx, `INSERT INTO accounts (code,name,parent_code,is_active) VALUES ($1,$2,NULLIF($3,''),$4) ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name,parent_code=EXCLUDED.parent_code,is_active=EXCLUDED.is_active`, item.Code, item.Name, item.ParentCode, item.IsActive)
+		if err != nil {
+			return fmt.Errorf("save account %s: %w", item.Code, err)
+		}
+	}
+
+	counterpartyCodes := make([]string, 0, len(db.Counterparties))
+	for _, item := range db.Counterparties {
+		counterpartyCodes = append(counterpartyCodes, item.Code)
+		_, err := tx.Exec(ctx, `INSERT INTO counterparties (code,name,tax_code,address) VALUES ($1,$2,$3,$4)
+			ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name,tax_code=EXCLUDED.tax_code,address=EXCLUDED.address,updated_at=NOW()`, item.Code, item.Name, item.TaxCode, item.Address)
+		if err != nil {
+			return fmt.Errorf("save counterparty %s: %w", item.Code, err)
+		}
+	}
+	if err := deleteMissing(ctx, tx, "counterparties", counterpartyCodes); err != nil {
+		return err
+	}
 
 	periodIDs := make([]string, 0, len(db.Periods))
 	for _, item := range db.Periods {
@@ -302,8 +365,16 @@ func syncDatabase(ctx context.Context, tx pgx.Tx, db domain.Database) error {
 	transactionIDs := make([]string, 0, len(db.Transactions))
 	for _, item := range db.Transactions {
 		transactionIDs = append(transactionIDs, item.ID)
-		_, err := tx.Exec(ctx, `INSERT INTO transactions (id,period_id,transaction_date,type,description,invoice_no,amount,vat_amount,revenue_category,document_no,payment_status,outstanding_amount) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,NULLIF($10,''),NULLIF($11,''),$12)
-			ON CONFLICT (id) DO UPDATE SET period_id=EXCLUDED.period_id,transaction_date=EXCLUDED.transaction_date,type=EXCLUDED.type,description=EXCLUDED.description,invoice_no=EXCLUDED.invoice_no,amount=EXCLUDED.amount,vat_amount=EXCLUDED.vat_amount,revenue_category=EXCLUDED.revenue_category,document_no=EXCLUDED.document_no,payment_status=EXCLUDED.payment_status,outstanding_amount=EXCLUDED.outstanding_amount,updated_at=NOW()`, item.ID, item.PeriodID, item.Date, item.Type, item.Description, item.InvoiceNo, item.Amount, item.VATAmount, item.RevenueCategory, item.DocumentNo, item.PaymentStatus, item.OutstandingAmount)
+		var receipt any
+		if item.CashReceipt != nil {
+			raw, marshalErr := json.Marshal(item.CashReceipt)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			receipt = string(raw)
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO transactions (id,period_id,transaction_date,type,description,invoice_no,amount,vat_amount,revenue_category,document_no,payment_status,outstanding_amount,voucher_type,counterparty_code,counterparty_name,counterparty_tax_code,counterparty_address,cash_receipt_data) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,NULLIF($10,''),NULLIF($11,''),$12,NULLIF($13,''),NULLIF($14,''),NULLIF($15,''),NULLIF($16,''),NULLIF($17,''),$18::jsonb)
+			ON CONFLICT (id) DO UPDATE SET period_id=EXCLUDED.period_id,transaction_date=EXCLUDED.transaction_date,type=EXCLUDED.type,description=EXCLUDED.description,invoice_no=EXCLUDED.invoice_no,amount=EXCLUDED.amount,vat_amount=EXCLUDED.vat_amount,revenue_category=EXCLUDED.revenue_category,document_no=EXCLUDED.document_no,payment_status=EXCLUDED.payment_status,outstanding_amount=EXCLUDED.outstanding_amount,voucher_type=EXCLUDED.voucher_type,counterparty_code=EXCLUDED.counterparty_code,counterparty_name=EXCLUDED.counterparty_name,counterparty_tax_code=EXCLUDED.counterparty_tax_code,counterparty_address=EXCLUDED.counterparty_address,cash_receipt_data=EXCLUDED.cash_receipt_data,updated_at=NOW()`, item.ID, item.PeriodID, item.Date, item.Type, item.Description, item.InvoiceNo, item.Amount, item.VATAmount, item.RevenueCategory, item.DocumentNo, item.PaymentStatus, item.OutstandingAmount, item.VoucherType, item.CounterpartyCode, item.CounterpartyName, item.CounterpartyTaxCode, item.CounterpartyAddress, receipt)
 		if err != nil {
 			return fmt.Errorf("save transaction %s: %w", item.ID, err)
 		}
@@ -343,7 +414,7 @@ func syncDatabase(ctx context.Context, tx pgx.Tx, db domain.Database) error {
 }
 
 func deleteMissing(ctx context.Context, tx pgx.Tx, table string, ids []string) error {
-	allowed := map[string]bool{"tax_periods": true, "transactions": true, "tax_declarations": true, "audit_entries": true}
+	allowed := map[string]bool{"counterparties": true, "tax_periods": true, "transactions": true, "tax_declarations": true, "audit_entries": true}
 	if !allowed[table] {
 		return fmt.Errorf("invalid table %q", table)
 	}
