@@ -39,12 +39,13 @@ func NewPostgresRepository(ctx context.Context, dsn string, seed domain.Database
 			pool.Close()
 			return nil, err
 		}
-		defer tx.Rollback(ctx)
 		if err := syncDatabase(ctx, tx, seed); err != nil {
+			tx.Rollback(ctx)
 			pool.Close()
 			return nil, fmt.Errorf("seed postgres: %w", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
+			tx.Rollback(ctx)
 			pool.Close()
 			return nil, fmt.Errorf("commit seed: %w", err)
 		}
@@ -414,14 +415,15 @@ func syncDatabase(ctx context.Context, tx pgx.Tx, db domain.Database) error {
 }
 
 func deleteMissing(ctx context.Context, tx pgx.Tx, table string, ids []string) error {
-	allowed := map[string]bool{"counterparties": true, "tax_periods": true, "transactions": true, "tax_declarations": true, "audit_entries": true}
-	if !allowed[table] {
+	keyColumns := map[string]string{"counterparties": "code", "tax_periods": "id", "transactions": "id", "tax_declarations": "id", "audit_entries": "id"}
+	column, ok := keyColumns[table]
+	if !ok {
 		return fmt.Errorf("invalid table %q", table)
 	}
 	if len(ids) == 0 {
 		_, err := tx.Exec(ctx, "DELETE FROM "+table)
 		return err
 	}
-	_, err := tx.Exec(ctx, "DELETE FROM "+table+" WHERE NOT (id = ANY($1::text[]))", ids)
+	_, err := tx.Exec(ctx, "DELETE FROM "+table+" WHERE NOT ("+column+" = ANY($1::text[]))", ids)
 	return err
 }

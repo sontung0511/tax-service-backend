@@ -1,5 +1,7 @@
 .PHONY: run dev db-up db-down test fmt vet
 
+COMPOSE := docker-compose
+
 run:
 	go run ./cmd/server
 
@@ -7,10 +9,10 @@ dev: db-up
 	go run ./cmd/server
 
 db-up:
-	docker compose up -d --wait postgres
+	$(COMPOSE) up -d --wait postgres
 
 db-down:
-	docker compose down
+	$(COMPOSE) down
 
 test:
 	go test ./...
