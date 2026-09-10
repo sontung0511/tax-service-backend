@@ -215,3 +215,51 @@ func TestUpdateCounterparty(t *testing.T) {
 		t.Fatalf("mismatched counterparty status = %d body=%s", invalid.Code, invalid.Body.String())
 	}
 }
+
+func TestCashReceiptSavesVATAccountingEntry(t *testing.T) {
+	handler := newTestServer(t)
+	receipt := map[string]any{
+		"periodId": "2026-q3", "voucherDate": "2026-08-11", "accountingDate": "2026-08-11", "status": "saved", "receiptNo": "PT-VAT",
+		"counterpartyCode": "KH-001", "counterpartyName": "Công ty Minh Long", "counterpartyTaxCode": "0312345678", "counterpartyAddress": "TP.HCM",
+		"description": "Thu tiền bán hàng", "contactName": "", "debitAccount": "1111", "creditAccount": "33311", "amount": 1000000,
+		"currency": "VND", "exchangeRate": 1, "convertedAmount": 1080000, "revenueCategory": "distribution", "invoiceNo": "HD-VAT", "invoiceDate": "2026-08-11",
+		"caseCode": "", "collector": "", "note": "", "attachments": []any{}, "entries": []any{
+			map[string]any{"debitAccount": "1111", "creditAccount": "511", "amount": 1000000, "description": "Doanh thu", "kind": "normal"},
+			map[string]any{"debitAccount": "1111", "creditAccount": "33311", "amount": 80000, "description": "Thuế GTGT 8%", "kind": "vat", "rate": 8},
+		}, "saveCounterparty": false,
+	}
+	created := request(t, handler, http.MethodPost, "/api/cash-receipts", receipt, true)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create VAT receipt status = %d body=%s", created.Code, created.Body.String())
+	}
+	var item struct {
+		VATAmount   int64 `json:"vatAmount"`
+		CashReceipt struct {
+			Entries []map[string]any `json:"entries"`
+		} `json:"cashReceipt"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if item.VATAmount != 80000 || len(item.CashReceipt.Entries) != 2 {
+		t.Fatalf("unexpected VAT receipt: %+v", item)
+	}
+	receipt["receiptNo"] = "PT-VAT-SAI"
+	receipt["entries"].([]any)[1].(map[string]any)["amount"] = 90000
+	invalid := request(t, handler, http.MethodPost, "/api/cash-receipts", receipt, true)
+	if invalid.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid VAT amount status = %d body=%s", invalid.Code, invalid.Body.String())
+	}
+	receipt["receiptNo"] = "PT-VAT-GOM"
+	receipt["amount"] = 1080000
+	receipt["convertedAmount"] = 1080000
+	receipt["amountIncludesVAT"] = true
+	receipt["entries"] = []any{
+		map[string]any{"debitAccount": "1111", "creditAccount": "511", "amount": 1000000, "description": "Doanh thu", "kind": "normal"},
+		map[string]any{"debitAccount": "1111", "creditAccount": "33311", "amount": 80000, "description": "Thuế GTGT 8%", "kind": "vat", "rate": 8},
+	}
+	inclusive := request(t, handler, http.MethodPost, "/api/cash-receipts", receipt, true)
+	if inclusive.Code != http.StatusCreated {
+		t.Fatalf("VAT-inclusive receipt status = %d body=%s", inclusive.Code, inclusive.Body.String())
+	}
+}

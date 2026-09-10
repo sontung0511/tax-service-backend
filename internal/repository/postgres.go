@@ -383,6 +383,56 @@ func syncDatabase(ctx context.Context, tx pgx.Tx, db domain.Database) error {
 	if err := deleteMissing(ctx, tx, "transactions", transactionIDs); err != nil {
 		return err
 	}
+	invoiceIDs := []string{}
+	revenueDetailIDs := []string{}
+	taxLineIDs := []string{}
+	for _, transaction := range db.Transactions {
+		if transaction.CashReceipt == nil {
+			continue
+		}
+		for _, invoice := range transaction.CashReceipt.Invoices {
+			if invoice.ID == "" {
+				continue
+			}
+			invoiceIDs = append(invoiceIDs, invoice.ID)
+			if _, err := tx.Exec(ctx, `INSERT INTO cash_receipt_invoices (id,voucher_id,invoice_no,invoice_symbol,invoice_date,tax_code)
+				VALUES ($1,$2,$3,$4,NULLIF($5,'')::date,$6)
+				ON CONFLICT (id) DO UPDATE SET voucher_id=EXCLUDED.voucher_id,invoice_no=EXCLUDED.invoice_no,invoice_symbol=EXCLUDED.invoice_symbol,invoice_date=EXCLUDED.invoice_date,tax_code=EXCLUDED.tax_code`, invoice.ID, transaction.ID, invoice.InvoiceNo, invoice.Symbol, invoice.InvoiceDate, invoice.TaxCode); err != nil {
+				return fmt.Errorf("save cash receipt invoice %s: %w", invoice.ID, err)
+			}
+		}
+		for _, detail := range transaction.CashReceipt.Entries {
+			if detail.Kind != "normal" || detail.ID == "" || detail.InvoiceID == "" {
+				continue
+			}
+			revenueDetailIDs = append(revenueDetailIDs, detail.ID)
+			if _, err := tx.Exec(ctx, `INSERT INTO cash_receipt_revenue_details (id,voucher_id,invoice_id,debit_account,credit_account,detail_code,quantity,unit_price,amount,description)
+				VALUES ($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10)
+				ON CONFLICT (id) DO UPDATE SET voucher_id=EXCLUDED.voucher_id,invoice_id=EXCLUDED.invoice_id,debit_account=EXCLUDED.debit_account,credit_account=EXCLUDED.credit_account,detail_code=EXCLUDED.detail_code,quantity=EXCLUDED.quantity,unit_price=EXCLUDED.unit_price,amount=EXCLUDED.amount,description=EXCLUDED.description`, detail.ID, transaction.ID, detail.InvoiceID, detail.DebitAccount, detail.CreditAccount, detail.DetailCode, detail.Quantity, detail.UnitPrice, detail.Amount, detail.Description); err != nil {
+				return fmt.Errorf("save cash receipt revenue detail %s: %w", detail.ID, err)
+			}
+		}
+		for _, taxLine := range transaction.CashReceipt.TaxLines {
+			if taxLine.ID == "" || taxLine.InvoiceID == "" || taxLine.RevenueDetailID == "" {
+				continue
+			}
+			taxLineIDs = append(taxLineIDs, taxLine.ID)
+			if _, err := tx.Exec(ctx, `INSERT INTO cash_receipt_tax_lines (id,voucher_id,invoice_id,revenue_detail_id,tax_rate,taxable_amount,tax_amount,price_includes_tax)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+				ON CONFLICT (id) DO UPDATE SET voucher_id=EXCLUDED.voucher_id,invoice_id=EXCLUDED.invoice_id,revenue_detail_id=EXCLUDED.revenue_detail_id,tax_rate=EXCLUDED.tax_rate,taxable_amount=EXCLUDED.taxable_amount,tax_amount=EXCLUDED.tax_amount,price_includes_tax=EXCLUDED.price_includes_tax`, taxLine.ID, transaction.ID, taxLine.InvoiceID, taxLine.RevenueDetailID, taxLine.TaxRate, taxLine.TaxableAmount, taxLine.TaxAmount, taxLine.PriceIncludesTax); err != nil {
+				return fmt.Errorf("save cash receipt tax line %s: %w", taxLine.ID, err)
+			}
+		}
+	}
+	if err := deleteMissing(ctx, tx, "cash_receipt_tax_lines", taxLineIDs); err != nil {
+		return err
+	}
+	if err := deleteMissing(ctx, tx, "cash_receipt_revenue_details", revenueDetailIDs); err != nil {
+		return err
+	}
+	if err := deleteMissing(ctx, tx, "cash_receipt_invoices", invoiceIDs); err != nil {
+		return err
+	}
 	if err := deleteMissing(ctx, tx, "tax_periods", periodIDs); err != nil {
 		return err
 	}

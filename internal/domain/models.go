@@ -69,32 +69,40 @@ type Account struct {
 
 // CashReceipt contains the data required to create a cash receipt voucher.
 type CashReceipt struct {
-	ID                  string              `json:"id,omitempty"`
-	PeriodID            string              `json:"periodId"`
-	VoucherDate         string              `json:"voucherDate"`
-	AccountingDate      string              `json:"accountingDate"`
-	Status              string              `json:"status"`
-	ReceiptNo           string              `json:"receiptNo"`
-	CounterpartyCode    string              `json:"counterpartyCode"`
-	CounterpartyName    string              `json:"counterpartyName"`
-	CounterpartyTaxCode string              `json:"counterpartyTaxCode"`
-	CounterpartyAddress string              `json:"counterpartyAddress"`
-	Description         string              `json:"description"`
-	ContactName         string              `json:"contactName"`
-	DebitAccount        string              `json:"debitAccount"`
-	CreditAccount       string              `json:"creditAccount"`
-	Amount              Money               `json:"amount"`
-	Currency            string              `json:"currency"`
-	ExchangeRate        float64             `json:"exchangeRate"`
-	ConvertedAmount     Money               `json:"convertedAmount"`
-	RevenueCategory     string              `json:"revenueCategory"`
-	InvoiceNo           string              `json:"invoiceNo"`
-	InvoiceDate         string              `json:"invoiceDate"`
-	CaseCode            string              `json:"caseCode"`
-	Collector           string              `json:"collector"`
-	Note                string              `json:"note"`
-	Attachments         []ReceiptAttachment `json:"attachments"`
-	SaveCounterparty    bool                `json:"saveCounterparty"`
+	ID                  string                   `json:"id,omitempty"`
+	PeriodID            string                   `json:"periodId"`
+	VoucherDate         string                   `json:"voucherDate"`
+	AccountingDate      string                   `json:"accountingDate"`
+	Status              string                   `json:"status"`
+	ReceiptNo           string                   `json:"receiptNo"`
+	CounterpartyCode    string                   `json:"counterpartyCode"`
+	CounterpartyName    string                   `json:"counterpartyName"`
+	CounterpartyTaxCode string                   `json:"counterpartyTaxCode"`
+	CounterpartyAddress string                   `json:"counterpartyAddress"`
+	Description         string                   `json:"description"`
+	ContactName         string                   `json:"contactName"`
+	DebitAccount        string                   `json:"debitAccount"`
+	CreditAccount       string                   `json:"creditAccount"`
+	Amount              Money                    `json:"amount"`
+	AmountIncludesVAT   bool                     `json:"amountIncludesVAT"`
+	Currency            string                   `json:"currency"`
+	ExchangeRate        float64                  `json:"exchangeRate"`
+	ConvertedAmount     Money                    `json:"convertedAmount"`
+	RevenueCategory     string                   `json:"revenueCategory"`
+	InvoiceNo           string                   `json:"invoiceNo"`
+	InvoiceSymbol       string                   `json:"invoiceSymbol"`
+	InvoiceDate         string                   `json:"invoiceDate"`
+	DetailCode          string                   `json:"detailCode"`
+	Quantity            string                   `json:"quantity"`
+	UnitPrice           Money                    `json:"unitPrice"`
+	CaseCode            string                   `json:"caseCode"`
+	Collector           string                   `json:"collector"`
+	Note                string                   `json:"note"`
+	Attachments         []ReceiptAttachment      `json:"attachments"`
+	Entries             []ReceiptAccountingEntry `json:"entries"`
+	Invoices            []ReceiptInvoice         `json:"invoices"`
+	TaxLines            []ReceiptTaxLine         `json:"taxLines"`
+	SaveCounterparty    bool                     `json:"saveCounterparty"`
 }
 
 type ReceiptAttachment struct {
@@ -104,22 +112,66 @@ type ReceiptAttachment struct {
 	Data string `json:"data"`
 }
 
+type ReceiptAccountingEntry struct {
+	ID            string  `json:"id"`
+	VoucherID     string  `json:"voucherId"`
+	InvoiceID     string  `json:"invoiceId"`
+	DebitAccount  string  `json:"debitAccount"`
+	CreditAccount string  `json:"creditAccount"`
+	Amount        Money   `json:"amount"`
+	Description   string  `json:"description"`
+	Kind          string  `json:"kind"`
+	Rate          float64 `json:"rate,omitempty"`
+	DetailCode    string  `json:"detailCode,omitempty"`
+	Quantity      string  `json:"quantity,omitempty"`
+	UnitPrice     Money   `json:"unitPrice,omitempty"`
+	RevenueDetailID string `json:"revenueDetailId,omitempty"`
+}
+
+type ReceiptInvoice struct {
+	ID          string `json:"id"`
+	VoucherID   string `json:"voucherId"`
+	InvoiceNo   string `json:"invoiceNo"`
+	Symbol      string `json:"symbol"`
+	InvoiceDate string `json:"invoiceDate"`
+	TaxCode     string `json:"taxCode"`
+}
+
+type ReceiptTaxLine struct {
+	ID               string  `json:"id"`
+	VoucherID        string  `json:"voucherId"`
+	InvoiceID        string  `json:"invoiceId"`
+	RevenueDetailID  string  `json:"revenueDetailId"`
+	TaxRate          float64 `json:"taxRate"`
+	TaxableAmount    Money   `json:"taxableAmount"`
+	TaxAmount        Money   `json:"taxAmount"`
+	PriceIncludesTax bool    `json:"priceIncludesTax"`
+}
+
 type CashReceiptData struct {
-	VoucherDate     string              `json:"voucherDate"`
-	AccountingDate  string              `json:"accountingDate"`
-	Status          string              `json:"status"`
-	ContactName     string              `json:"contactName"`
-	DebitAccount    string              `json:"debitAccount"`
-	CreditAccount   string              `json:"creditAccount"`
-	Currency        string              `json:"currency"`
-	ExchangeRate    float64             `json:"exchangeRate"`
-	ConvertedAmount Money               `json:"convertedAmount"`
-	InvoiceNo       string              `json:"invoiceNo"`
-	InvoiceDate     string              `json:"invoiceDate"`
-	CaseCode        string              `json:"caseCode"`
-	Collector       string              `json:"collector"`
-	Note            string              `json:"note"`
-	Attachments     []ReceiptAttachment `json:"attachments"`
+	VoucherDate       string                   `json:"voucherDate"`
+	AccountingDate    string                   `json:"accountingDate"`
+	Status            string                   `json:"status"`
+	ContactName       string                   `json:"contactName"`
+	DebitAccount      string                   `json:"debitAccount"`
+	CreditAccount     string                   `json:"creditAccount"`
+	Currency          string                   `json:"currency"`
+	ExchangeRate      float64                  `json:"exchangeRate"`
+	ConvertedAmount   Money                    `json:"convertedAmount"`
+	AmountIncludesVAT bool                     `json:"amountIncludesVAT"`
+	InvoiceNo         string                   `json:"invoiceNo"`
+	InvoiceSymbol     string                   `json:"invoiceSymbol"`
+	InvoiceDate       string                   `json:"invoiceDate"`
+	DetailCode        string                   `json:"detailCode"`
+	Quantity          string                   `json:"quantity"`
+	UnitPrice         Money                    `json:"unitPrice"`
+	CaseCode          string                   `json:"caseCode"`
+	Collector         string                   `json:"collector"`
+	Note              string                   `json:"note"`
+	Attachments       []ReceiptAttachment      `json:"attachments"`
+	Entries           []ReceiptAccountingEntry `json:"entries"`
+	Invoices          []ReceiptInvoice         `json:"invoices"`
+	TaxLines          []ReceiptTaxLine         `json:"taxLines"`
 }
 
 type TaxLine struct {
