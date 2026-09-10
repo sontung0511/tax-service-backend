@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"tax-client/backend/internal/domain"
 	"tax-client/backend/internal/repository"
 	"tax-client/backend/internal/seed"
 )
@@ -261,5 +263,42 @@ func TestCashReceiptSavesVATAccountingEntry(t *testing.T) {
 	inclusive := request(t, handler, http.MethodPost, "/api/cash-receipts", receipt, true)
 	if inclusive.Code != http.StatusCreated {
 		t.Fatalf("VAT-inclusive receipt status = %d body=%s", inclusive.Code, inclusive.Body.String())
+	}
+}
+
+func TestQuantityTimesMoney(t *testing.T) {
+	tests := []struct {
+		name      string
+		quantity  string
+		unitPrice domain.Money
+		want      domain.Money
+		wantError bool
+	}{
+		{name: "integer", quantity: "2", unitPrice: 15000, want: 30000},
+		{name: "decimal", quantity: "1.25", unitPrice: 10000, want: 12500},
+		{name: "round to VND", quantity: "0.5", unitPrice: 101, want: 51},
+		{name: "reject zero", quantity: "0", unitPrice: 10000, wantError: true},
+		{name: "reject fraction notation", quantity: "1/2", unitPrice: 10000, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := quantityTimesMoney(test.quantity, test.unitPrice)
+			if (err != nil) != test.wantError || got != test.want {
+				t.Fatalf("quantityTimesMoney(%q, %d) = %d, %v; want %d, error=%v", test.quantity, test.unitPrice, got, err, test.want, test.wantError)
+			}
+		})
+	}
+}
+
+func TestValidVATRate(t *testing.T) {
+	for _, rate := range []float64{0, 5, 8, 10} {
+		if !validVATRate(rate) {
+			t.Fatalf("expected VAT rate %v to be valid", rate)
+		}
+	}
+	for _, rate := range []float64{-1, 7, 10.5, math.NaN()} {
+		if validVATRate(rate) {
+			t.Fatalf("expected VAT rate %v to be invalid", rate)
+		}
 	}
 }

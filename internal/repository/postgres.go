@@ -465,7 +465,16 @@ func syncDatabase(ctx context.Context, tx pgx.Tx, db domain.Database) error {
 }
 
 func deleteMissing(ctx context.Context, tx pgx.Tx, table string, ids []string) error {
-	keyColumns := map[string]string{"counterparties": "code", "tax_periods": "id", "transactions": "id", "tax_declarations": "id", "audit_entries": "id"}
+	keyColumns := map[string]string{
+		"counterparties":               "code",
+		"tax_periods":                  "id",
+		"transactions":                 "id",
+		"cash_receipt_invoices":        "id",
+		"cash_receipt_revenue_details": "id",
+		"cash_receipt_tax_lines":       "id",
+		"tax_declarations":             "id",
+		"audit_entries":                "id",
+	}
 	column, ok := keyColumns[table]
 	if !ok {
 		return fmt.Errorf("invalid table %q", table)

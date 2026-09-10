@@ -867,6 +867,9 @@ func normalizeCashReceipt(voucherID string, input *domain.CashReceipt) {
 			if entry.DetailCode == "" {
 				entry.DetailCode = strings.TrimSpace(input.DetailCode)
 			}
+			if entry.DetailCode == "" {
+				entry.DetailCode = "DOANH_THU"
+			}
 			if entry.Quantity == "" {
 				entry.Quantity = input.Quantity
 			}
@@ -1063,6 +1066,47 @@ func validAccount(value string) bool {
 	return true
 }
 
+func validVATRate(rate float64) bool {
+	switch rate {
+	case 0, 5, 8, 10:
+		return true
+	default:
+		return false
+	}
+}
+
+func quantityTimesMoney(quantity string, unitPrice domain.Money) (domain.Money, error) {
+	quantity = strings.TrimSpace(quantity)
+	if quantity == "" || unitPrice < 0 {
+		return 0, errors.New("số lượng hoặc đơn giá không hợp lệ")
+	}
+	decimalPointSeen := false
+	for _, char := range quantity {
+		switch {
+		case char >= '0' && char <= '9':
+		case char == '.' && !decimalPointSeen:
+			decimalPointSeen = true
+		default:
+			return 0, errors.New("số lượng phải là số thập phân dương")
+		}
+	}
+
+	parsed, ok := new(big.Rat).SetString(quantity)
+	if !ok || parsed.Sign() <= 0 {
+		return 0, errors.New("số lượng phải lớn hơn 0")
+	}
+	product := new(big.Rat).Mul(parsed, new(big.Rat).SetInt64(int64(unitPrice)))
+	quotient, remainder := new(big.Int), new(big.Int)
+	quotient.QuoRem(product.Num(), product.Denom(), remainder)
+	if new(big.Int).Lsh(remainder, 1).Cmp(product.Denom()) >= 0 {
+		quotient.Add(quotient, big.NewInt(1))
+	}
+	if !quotient.IsInt64() {
+		return 0, errors.New("số tiền vượt quá giới hạn")
+	}
+	return domain.Money(quotient.Int64()), nil
+}
+
 func receiptTransaction(id string, input domain.CashReceipt) domain.Transaction {
 	var vatAmount domain.Money
 	for _, entry := range input.Entries {
@@ -1070,7 +1114,7 @@ func receiptTransaction(id string, input domain.CashReceipt) domain.Transaction 
 			vatAmount += entry.Amount
 		}
 	}
-	return domain.Transaction{ID: id, PeriodID: input.PeriodID, Date: input.VoucherDate, Type: "revenue", Description: strings.TrimSpace(input.Description), InvoiceNo: strings.TrimSpace(input.ReceiptNo), DocumentNo: strings.TrimSpace(input.ReceiptNo), Amount: input.ConvertedAmount, VATAmount: vatAmount, RevenueCategory: input.RevenueCategory, PaymentStatus: "paid", VoucherType: "cash_receipt", CounterpartyCode: strings.TrimSpace(input.CounterpartyCode), CounterpartyName: strings.TrimSpace(input.CounterpartyName), CounterpartyTaxCode: strings.TrimSpace(input.CounterpartyTaxCode), CounterpartyAddress: strings.TrimSpace(input.CounterpartyAddress), CashReceipt: &domain.CashReceiptData{VoucherDate: input.VoucherDate, AccountingDate: input.AccountingDate, Status: input.Status, ContactName: input.ContactName, DebitAccount: input.DebitAccount, CreditAccount: input.CreditAccount, Currency: input.Currency, ExchangeRate: input.ExchangeRate, ConvertedAmount: input.ConvertedAmount, AmountIncludesVAT: input.AmountIncludesVAT, InvoiceNo: input.InvoiceNo, InvoiceDate: input.InvoiceDate, CaseCode: input.CaseCode, Collector: input.Collector, Note: input.Note, Attachments: input.Attachments, Entries: input.Entries}}
+	return domain.Transaction{ID: id, PeriodID: input.PeriodID, Date: input.VoucherDate, Type: "revenue", Description: strings.TrimSpace(input.Description), InvoiceNo: strings.TrimSpace(input.ReceiptNo), DocumentNo: strings.TrimSpace(input.ReceiptNo), Amount: input.ConvertedAmount, VATAmount: vatAmount, RevenueCategory: input.RevenueCategory, PaymentStatus: "paid", VoucherType: "cash_receipt", CounterpartyCode: strings.TrimSpace(input.CounterpartyCode), CounterpartyName: strings.TrimSpace(input.CounterpartyName), CounterpartyTaxCode: strings.TrimSpace(input.CounterpartyTaxCode), CounterpartyAddress: strings.TrimSpace(input.CounterpartyAddress), CashReceipt: &domain.CashReceiptData{VoucherDate: input.VoucherDate, AccountingDate: input.AccountingDate, Status: input.Status, ContactName: input.ContactName, DebitAccount: input.DebitAccount, CreditAccount: input.CreditAccount, Currency: input.Currency, ExchangeRate: input.ExchangeRate, ConvertedAmount: input.ConvertedAmount, AmountIncludesVAT: input.AmountIncludesVAT, InvoiceNo: input.InvoiceNo, InvoiceSymbol: input.InvoiceSymbol, InvoiceDate: input.InvoiceDate, DetailCode: input.DetailCode, Quantity: input.Quantity, UnitPrice: input.UnitPrice, CaseCode: input.CaseCode, Collector: input.Collector, Note: input.Note, Attachments: input.Attachments, Entries: input.Entries, Invoices: input.Invoices, TaxLines: input.TaxLines}}
 }
 
 func findPeriod(items []domain.TaxPeriod, id string) *domain.TaxPeriod {
