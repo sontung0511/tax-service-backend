@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
@@ -384,11 +386,13 @@ func (s *Server) cashReceipts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	voucherID := newID("tx")
+	normalizeCashReceipt(voucherID, &input)
 	if err := validateCashReceipt(input); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
 		return
 	}
-	item := receiptTransaction(newID("tx"), input)
+	item := receiptTransaction(voucherID, input)
 	err := s.repo.Update(r.Context(), func(db *domain.Database) error {
 		period := findPeriod(db.Periods, item.PeriodID)
 		if period == nil {
@@ -396,6 +400,9 @@ func (s *Server) cashReceipts(w http.ResponseWriter, r *http.Request) {
 		}
 		if period.LockedAt != nil {
 			return errConflict
+		}
+		if err := validateReceiptAccountCatalog(db.Accounts, item.CashReceipt); err != nil {
+			return validationError{[]validation.Issue{{TransactionID: item.ID, Code: "invalid_account", Message: err.Error()}}}
 		}
 		candidate := append(append([]domain.Transaction{}, db.Transactions...), item)
 		if issues := validation.Transactions(candidate); len(issues) > 0 {
@@ -439,6 +446,7 @@ func (s *Server) updateCashReceipt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "id_mismatch", "mã phiếu thu trong URL và dữ liệu không khớp")
 		return
 	}
+	normalizeCashReceipt(id, &input)
 	if err := validateCashReceipt(input); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
 		return
@@ -460,8 +468,8 @@ func (s *Server) updateCashReceipt(w http.ResponseWriter, r *http.Request) {
 			if (period != nil && period.LockedAt != nil) || target.LockedAt != nil {
 				return errConflict
 			}
-			if !hasActiveAccount(db.Accounts, item.CashReceipt.DebitAccount) || !hasActiveAccount(db.Accounts, item.CashReceipt.CreditAccount) {
-				return validationError{[]validation.Issue{{TransactionID: item.ID, Code: "invalid_account", Message: "tài khoản Nợ/Có không tồn tại hoặc đã ngừng sử dụng"}}}
+			if err := validateReceiptAccountCatalog(db.Accounts, item.CashReceipt); err != nil {
+				return validationError{[]validation.Issue{{TransactionID: item.ID, Code: "invalid_account", Message: err.Error()}}}
 			}
 			candidate := append([]domain.Transaction{}, db.Transactions...)
 			candidate[index] = item
@@ -830,6 +838,74 @@ func validateCounterparty(item domain.Counterparty) error {
 	return nil
 }
 
+func normalizeCashReceipt(voucherID string, input *domain.CashReceipt) {
+	if len(input.Invoices) == 0 && strings.TrimSpace(input.InvoiceNo) != "" {
+		input.Invoices = []domain.ReceiptInvoice{{ID: newID("inv"), InvoiceNo: strings.TrimSpace(input.InvoiceNo), Symbol: strings.TrimSpace(input.InvoiceSymbol), InvoiceDate: input.InvoiceDate, TaxCode: strings.TrimSpace(input.CounterpartyTaxCode)}}
+	}
+	for index := range input.Invoices {
+		invoice := &input.Invoices[index]
+		if invoice.ID == "" {
+			invoice.ID = newID("inv")
+		}
+		invoice.VoucherID = voucherID
+	}
+	defaultInvoiceID := ""
+	if len(input.Invoices) == 1 {
+		defaultInvoiceID = input.Invoices[0].ID
+	}
+	revenueByInvoice := map[string]string{}
+	for index := range input.Entries {
+		entry := &input.Entries[index]
+		if entry.ID == "" {
+			entry.ID = newID("detail")
+		}
+		entry.VoucherID = voucherID
+		if entry.InvoiceID == "" {
+			entry.InvoiceID = defaultInvoiceID
+		}
+		if entry.Kind == "normal" {
+			if entry.DetailCode == "" {
+				entry.DetailCode = strings.TrimSpace(input.DetailCode)
+			}
+			if entry.Quantity == "" {
+				entry.Quantity = input.Quantity
+			}
+			if entry.Quantity == "" {
+				entry.Quantity = "1"
+			}
+			if entry.UnitPrice == 0 {
+				entry.UnitPrice = input.UnitPrice
+			}
+			if entry.UnitPrice == 0 {
+				entry.UnitPrice = entry.Amount
+			}
+			revenueByInvoice[entry.InvoiceID] = entry.ID
+		}
+	}
+	if len(input.TaxLines) == 0 {
+		for index := range input.Entries {
+			entry := &input.Entries[index]
+			if entry.Kind != "vat" {
+				continue
+			}
+			if entry.RevenueDetailID == "" {
+				entry.RevenueDetailID = revenueByInvoice[entry.InvoiceID]
+			}
+			taxableAmount := domain.Money(0)
+			for _, detail := range input.Entries {
+				if detail.ID == entry.RevenueDetailID {
+					taxableAmount = detail.Amount
+					break
+				}
+			}
+			input.TaxLines = append(input.TaxLines, domain.ReceiptTaxLine{ID: newID("vat"), VoucherID: voucherID, InvoiceID: entry.InvoiceID, RevenueDetailID: entry.RevenueDetailID, TaxRate: entry.Rate, TaxableAmount: taxableAmount, TaxAmount: entry.Amount, PriceIncludesTax: input.AmountIncludesVAT})
+		}
+	}
+	for index := range input.TaxLines {
+		input.TaxLines[index].VoucherID = voucherID
+	}
+}
+
 func validateCashReceipt(input domain.CashReceipt) error {
 	if input.Status != "draft" && input.Status != "saved" {
 		return errors.New("trạng thái phiếu thu không hợp lệ")
@@ -846,11 +922,91 @@ func validateCashReceipt(input domain.CashReceipt) error {
 	if !validAccount(input.DebitAccount) || !validAccount(input.CreditAccount) {
 		return errors.New("tài khoản Nợ/Có phải gồm 3 đến 10 chữ số")
 	}
+	invoices := make(map[string]domain.ReceiptInvoice, len(input.Invoices))
+	for _, invoice := range input.Invoices {
+		if invoice.ID == "" || invoice.VoucherID == "" || strings.TrimSpace(invoice.InvoiceNo) == "" {
+			return errors.New("hóa đơn phải có ID, voucher_id và số hóa đơn")
+		}
+		if _, duplicated := invoices[invoice.ID]; duplicated {
+			return errors.New("ID hóa đơn bị trùng")
+		}
+		if invoice.InvoiceDate != "" {
+			if _, err := time.Parse(time.DateOnly, invoice.InvoiceDate); err != nil {
+				return errors.New("ngày hóa đơn phải có dạng YYYY-MM-DD")
+			}
+		}
+		invoices[invoice.ID] = invoice
+	}
+	revenueDetails := map[string]domain.ReceiptAccountingEntry{}
+	vatEntries := map[string]domain.ReceiptAccountingEntry{}
+	var debitTotal, creditTotal, receiptTotal domain.Money
+	for _, entry := range input.Entries {
+		if !validAccount(entry.DebitAccount) || !validAccount(entry.CreditAccount) || entry.Amount < 0 {
+			return errors.New("dòng định khoản phải có tài khoản Nợ/Có và số tiền hợp lệ")
+		}
+		if entry.Kind != "normal" && entry.Kind != "vat" && entry.Kind != "cogs" {
+			return errors.New("loại dòng định khoản không hợp lệ")
+		}
+		if entry.Kind == "vat" && (entry.CreditAccount != "33311" || !validVATRate(entry.Rate)) {
+			return errors.New("định khoản thuế GTGT hoặc tỷ lệ thuế không hợp lệ")
+		}
+		if entry.Kind == "normal" {
+			if entry.ID == "" || entry.VoucherID == "" || entry.InvoiceID == "" || strings.TrimSpace(entry.DetailCode) == "" || entry.UnitPrice < 0 || entry.Amount <= 0 {
+				return errors.New("dòng doanh thu thiếu ID liên kết, mã hàng, số lượng hoặc đơn giá")
+			}
+			if _, found := invoices[entry.InvoiceID]; !found {
+				return errors.New("dòng doanh thu không liên kết đúng hóa đơn")
+			}
+			expectedAmount, err := quantityTimesMoney(entry.Quantity, entry.UnitPrice)
+			if err != nil || expectedAmount != entry.Amount {
+				return errors.New("số tiền dòng doanh thu phải bằng số lượng nhân đơn giá và làm tròn đến đồng")
+			}
+			revenueDetails[entry.ID] = entry
+			receiptTotal += entry.Amount
+		}
+		if entry.Kind == "vat" {
+			if entry.ID == "" || entry.InvoiceID == "" || entry.RevenueDetailID == "" {
+				return errors.New("dòng thuế thiếu ID hóa đơn hoặc revenue_detail_id")
+			}
+			vatEntries[entry.RevenueDetailID] = entry
+			receiptTotal += entry.Amount
+		}
+		if entry.Kind == "cogs" && entry.Amount <= 0 {
+			return errors.New("số tiền dòng giá vốn phải lớn hơn 0")
+		}
+		debitTotal += entry.Amount
+		creditTotal += entry.Amount
+	}
 	if input.Amount <= 0 || input.ConvertedAmount <= 0 {
 		return errors.New("số tiền và số tiền quy đổi phải là số nguyên VND dương")
 	}
 	if strings.TrimSpace(input.Currency) == "" || input.ExchangeRate <= 0 {
 		return errors.New("loại tiền hoặc tỷ giá không hợp lệ")
+	}
+	for _, taxLine := range input.TaxLines {
+		detail, found := revenueDetails[taxLine.RevenueDetailID]
+		if taxLine.ID == "" || taxLine.VoucherID == "" || !found || detail.InvoiceID != taxLine.InvoiceID || !validVATRate(taxLine.TaxRate) {
+			return errors.New("dòng thuế không liên kết đúng phiếu thu, hóa đơn và dòng doanh thu")
+		}
+		if taxLine.TaxableAmount != detail.Amount {
+			return errors.New("giá tính thuế không khớp dòng doanh thu được liên kết")
+		}
+		expectedTax := domain.Money(math.Round(float64(taxLine.TaxableAmount) * taxLine.TaxRate / 100))
+		entry, found := vatEntries[taxLine.RevenueDetailID]
+		if taxLine.TaxAmount != expectedTax || !found || entry.Amount != expectedTax || entry.InvoiceID != taxLine.InvoiceID {
+			return errors.New("tiền thuế GTGT không đúng hoặc không khớp dòng định khoản 33311")
+		}
+	}
+	if len(input.TaxLines) != len(vatEntries) {
+		return errors.New("mỗi dòng thuế phải liên kết duy nhất với một dòng doanh thu")
+	}
+	if debitTotal != creditTotal {
+		return fmt.Errorf("định khoản không cân bằng, chênh lệch %d đồng", debitTotal-creditTotal)
+	}
+	if len(input.Entries) > 0 {
+		if input.ConvertedAmount != domain.Money(math.Round(float64(receiptTotal)*input.ExchangeRate)) {
+			return errors.New("số tiền quy đổi không khớp tổng tiền Nợ của phiếu thu")
+		}
 	}
 	if input.InvoiceDate != "" {
 		if _, err := time.Parse(time.DateOnly, input.InvoiceDate); err != nil {
@@ -908,7 +1064,13 @@ func validAccount(value string) bool {
 }
 
 func receiptTransaction(id string, input domain.CashReceipt) domain.Transaction {
-	return domain.Transaction{ID: id, PeriodID: input.PeriodID, Date: input.VoucherDate, Type: "revenue", Description: strings.TrimSpace(input.Description), InvoiceNo: strings.TrimSpace(input.ReceiptNo), DocumentNo: strings.TrimSpace(input.ReceiptNo), Amount: input.ConvertedAmount, VATAmount: 0, RevenueCategory: input.RevenueCategory, PaymentStatus: "paid", VoucherType: "cash_receipt", CounterpartyCode: strings.TrimSpace(input.CounterpartyCode), CounterpartyName: strings.TrimSpace(input.CounterpartyName), CounterpartyTaxCode: strings.TrimSpace(input.CounterpartyTaxCode), CounterpartyAddress: strings.TrimSpace(input.CounterpartyAddress), CashReceipt: &domain.CashReceiptData{VoucherDate: input.VoucherDate, AccountingDate: input.AccountingDate, Status: input.Status, ContactName: input.ContactName, DebitAccount: input.DebitAccount, CreditAccount: input.CreditAccount, Currency: input.Currency, ExchangeRate: input.ExchangeRate, ConvertedAmount: input.ConvertedAmount, InvoiceNo: input.InvoiceNo, InvoiceDate: input.InvoiceDate, CaseCode: input.CaseCode, Collector: input.Collector, Note: input.Note, Attachments: input.Attachments}}
+	var vatAmount domain.Money
+	for _, entry := range input.Entries {
+		if entry.Kind == "vat" {
+			vatAmount += entry.Amount
+		}
+	}
+	return domain.Transaction{ID: id, PeriodID: input.PeriodID, Date: input.VoucherDate, Type: "revenue", Description: strings.TrimSpace(input.Description), InvoiceNo: strings.TrimSpace(input.ReceiptNo), DocumentNo: strings.TrimSpace(input.ReceiptNo), Amount: input.ConvertedAmount, VATAmount: vatAmount, RevenueCategory: input.RevenueCategory, PaymentStatus: "paid", VoucherType: "cash_receipt", CounterpartyCode: strings.TrimSpace(input.CounterpartyCode), CounterpartyName: strings.TrimSpace(input.CounterpartyName), CounterpartyTaxCode: strings.TrimSpace(input.CounterpartyTaxCode), CounterpartyAddress: strings.TrimSpace(input.CounterpartyAddress), CashReceipt: &domain.CashReceiptData{VoucherDate: input.VoucherDate, AccountingDate: input.AccountingDate, Status: input.Status, ContactName: input.ContactName, DebitAccount: input.DebitAccount, CreditAccount: input.CreditAccount, Currency: input.Currency, ExchangeRate: input.ExchangeRate, ConvertedAmount: input.ConvertedAmount, AmountIncludesVAT: input.AmountIncludesVAT, InvoiceNo: input.InvoiceNo, InvoiceDate: input.InvoiceDate, CaseCode: input.CaseCode, Collector: input.Collector, Note: input.Note, Attachments: input.Attachments, Entries: input.Entries}}
 }
 
 func findPeriod(items []domain.TaxPeriod, id string) *domain.TaxPeriod {
@@ -937,6 +1099,18 @@ func hasActiveAccount(items []domain.Account, code string) bool {
 		}
 	}
 	return false
+}
+
+func validateReceiptAccountCatalog(accounts []domain.Account, receipt *domain.CashReceiptData) error {
+	if receipt == nil || !hasActiveAccount(accounts, receipt.DebitAccount) || !hasActiveAccount(accounts, receipt.CreditAccount) {
+		return errors.New("tài khoản Nợ/Có không tồn tại hoặc đã ngừng sử dụng")
+	}
+	for _, entry := range receipt.Entries {
+		if !hasActiveAccount(accounts, entry.DebitAccount) || !hasActiveAccount(accounts, entry.CreditAccount) {
+			return fmt.Errorf("tài khoản định khoản %s/%s không tồn tại hoặc đã ngừng sử dụng", entry.DebitAccount, entry.CreditAccount)
+		}
+	}
+	return nil
 }
 func filterTransactions(items []domain.Transaction, periodID string) []domain.Transaction {
 	out := make([]domain.Transaction, 0)
