@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type Money int64
 
@@ -50,6 +53,8 @@ type Transaction struct {
 	CounterpartyTaxCode string           `json:"counterpartyTaxCode,omitempty"`
 	CounterpartyAddress string           `json:"counterpartyAddress,omitempty"`
 	CashReceipt         *CashReceiptData `json:"cashReceipt,omitempty"`
+	CashPayment         json.RawMessage  `json:"cashPayment,omitempty"`
+	CarryForward        json.RawMessage  `json:"carryForward,omitempty"`
 }
 
 // Counterparty is a reusable customer or supplier record used on vouchers.
@@ -229,4 +234,68 @@ type Database struct {
 	Accounts       []Account        `json:"accounts"`
 	Declarations   []TaxDeclaration `json:"declarations"`
 	Audit          []AuditEntry     `json:"audit"`
+}
+
+// CashPayment is the payload of a cash payment voucher (phiếu chi).
+type CashPayment struct {
+	ID               string              `json:"id,omitempty"`
+	PeriodID         string              `json:"periodId"`
+	Status           string              `json:"status"`
+	Month            string              `json:"month"`
+	CTGSNo           string              `json:"ctgsNo"`
+	PostingDate      string              `json:"postingDate"`
+	VoucherDate      string              `json:"voucherDate"`
+	PaymentNo        string              `json:"paymentNo"`
+	RecipientCode    string              `json:"recipientCode"`
+	RecipientName    string              `json:"recipientName"`
+	RecipientTaxCode string              `json:"recipientTaxCode"`
+	RecipientAddress string              `json:"recipientAddress"`
+	RelatedDocument  string              `json:"relatedDocumentNo"`
+	Description      string              `json:"description"`
+	InvoiceType      string              `json:"invoiceType"`
+	InvoiceNo        string              `json:"invoiceNo"`
+	InvoiceSerial    string              `json:"invoiceSerial"`
+	InvoiceDate      string              `json:"invoiceDate"`
+	UnitName         string              `json:"unitName"`
+	UnitAddress      string              `json:"unitAddress"`
+	ItemName         string              `json:"itemName"`
+	WarehouseCode    string              `json:"warehouseCode"`
+	DebitAccount     string              `json:"debitAccount"`
+	DebitSub1        string              `json:"debitSub1"`
+	DebitSub2        string              `json:"debitSub2"`
+	CreditAccount    string              `json:"creditAccount"`
+	CreditSub1       string              `json:"creditSub1"`
+	CreditSub2       string              `json:"creditSub2"`
+	CaseCode         string              `json:"caseCode"`
+	Quantity         float64             `json:"quantity"`
+	UnitPrice        Money               `json:"unitPrice"`
+	Currency         string              `json:"currency"`
+	ExchangeRate     float64             `json:"exchangeRate"`
+	Amount           Money               `json:"amount"`
+	EndingStock      string              `json:"endingStock"`
+	Note             string              `json:"note"`
+	Attachments      []ReceiptAttachment `json:"attachments"`
+	SavePayee        bool                `json:"savePayee"`
+}
+
+// CarryForward is an end-of-period closing voucher (chứng từ kết chuyển cuối kỳ).
+// It is a pure ledger voucher: it never counts as revenue or expense.
+type CarryForward struct {
+	ID          string              `json:"id,omitempty"`
+	PeriodID    string              `json:"periodId"`
+	Status      string              `json:"status"`
+	VoucherNo   string              `json:"voucherNo"`
+	VoucherDate string              `json:"voucherDate"`
+	PostingDate string              `json:"postingDate"`
+	Description string              `json:"description"`
+	Note        string              `json:"note"`
+	Entries     []CarryForwardEntry `json:"entries"`
+}
+
+type CarryForwardEntry struct {
+	ID            string `json:"id"`
+	DebitAccount  string `json:"debitAccount"`
+	CreditAccount string `json:"creditAccount"`
+	Amount        Money  `json:"amount"`
+	Description   string `json:"description"`
 }

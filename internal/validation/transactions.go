@@ -26,7 +26,7 @@ func Transactions(items []domain.Transaction) []Issue {
 		if _, err := time.Parse(time.DateOnly, item.Date); err != nil {
 			issues = append(issues, Issue{item.ID, "invalid", "ngày phải có dạng YYYY-MM-DD"})
 		}
-		if item.Type != "revenue" && item.Type != "expense" {
+		if item.Type != "revenue" && item.Type != "expense" && item.Type != "carry_forward" {
 			issues = append(issues, Issue{item.ID, "invalid", "loại giao dịch không hợp lệ"})
 		}
 		if item.InvoiceNo == "" {

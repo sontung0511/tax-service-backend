@@ -246,15 +246,15 @@ func loadDatabase(ctx context.Context, q querier) (domain.Database, error) {
 	rows.Close()
 
 	rows, err = q.Query(ctx, `SELECT id, period_id, transaction_date, type, description, invoice_no, amount, vat_amount, revenue_category,
-		COALESCE(document_no,''), COALESCE(payment_status,''), outstanding_amount, COALESCE(voucher_type,''), COALESCE(counterparty_code,''), COALESCE(counterparty_name,''), COALESCE(counterparty_tax_code,''), COALESCE(counterparty_address,''), cash_receipt_data FROM transactions ORDER BY transaction_date DESC, created_at DESC`)
+		COALESCE(document_no,''), COALESCE(payment_status,''), outstanding_amount, COALESCE(voucher_type,''), COALESCE(counterparty_code,''), COALESCE(counterparty_name,''), COALESCE(counterparty_tax_code,''), COALESCE(counterparty_address,''), cash_receipt_data, cash_payment_data, carry_forward_data FROM transactions ORDER BY transaction_date DESC, created_at DESC`)
 	if err != nil {
 		return db, err
 	}
 	for rows.Next() {
 		var item domain.Transaction
 		var date time.Time
-		var receipt []byte
-		if err := rows.Scan(&item.ID, &item.PeriodID, &date, &item.Type, &item.Description, &item.InvoiceNo, &item.Amount, &item.VATAmount, &item.RevenueCategory, &item.DocumentNo, &item.PaymentStatus, &item.OutstandingAmount, &item.VoucherType, &item.CounterpartyCode, &item.CounterpartyName, &item.CounterpartyTaxCode, &item.CounterpartyAddress, &receipt); err != nil {
+		var receipt, payment, carry []byte
+		if err := rows.Scan(&item.ID, &item.PeriodID, &date, &item.Type, &item.Description, &item.InvoiceNo, &item.Amount, &item.VATAmount, &item.RevenueCategory, &item.DocumentNo, &item.PaymentStatus, &item.OutstandingAmount, &item.VoucherType, &item.CounterpartyCode, &item.CounterpartyName, &item.CounterpartyTaxCode, &item.CounterpartyAddress, &receipt, &payment, &carry); err != nil {
 			rows.Close()
 			return db, err
 		}
@@ -266,6 +266,12 @@ func loadDatabase(ctx context.Context, q querier) (domain.Database, error) {
 				return db, err
 			}
 			item.CashReceipt = &details
+		}
+		if len(payment) > 0 {
+			item.CashPayment = payment
+		}
+		if len(carry) > 0 {
+			item.CarryForward = carry
 		}
 		db.Transactions = append(db.Transactions, item)
 	}
@@ -374,8 +380,15 @@ func syncDatabase(ctx context.Context, tx pgx.Tx, db domain.Database) error {
 			}
 			receipt = string(raw)
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO transactions (id,period_id,transaction_date,type,description,invoice_no,amount,vat_amount,revenue_category,document_no,payment_status,outstanding_amount,voucher_type,counterparty_code,counterparty_name,counterparty_tax_code,counterparty_address,cash_receipt_data) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,NULLIF($10,''),NULLIF($11,''),$12,NULLIF($13,''),NULLIF($14,''),NULLIF($15,''),NULLIF($16,''),NULLIF($17,''),$18::jsonb)
-			ON CONFLICT (id) DO UPDATE SET period_id=EXCLUDED.period_id,transaction_date=EXCLUDED.transaction_date,type=EXCLUDED.type,description=EXCLUDED.description,invoice_no=EXCLUDED.invoice_no,amount=EXCLUDED.amount,vat_amount=EXCLUDED.vat_amount,revenue_category=EXCLUDED.revenue_category,document_no=EXCLUDED.document_no,payment_status=EXCLUDED.payment_status,outstanding_amount=EXCLUDED.outstanding_amount,voucher_type=EXCLUDED.voucher_type,counterparty_code=EXCLUDED.counterparty_code,counterparty_name=EXCLUDED.counterparty_name,counterparty_tax_code=EXCLUDED.counterparty_tax_code,counterparty_address=EXCLUDED.counterparty_address,cash_receipt_data=EXCLUDED.cash_receipt_data,updated_at=NOW()`, item.ID, item.PeriodID, item.Date, item.Type, item.Description, item.InvoiceNo, item.Amount, item.VATAmount, item.RevenueCategory, item.DocumentNo, item.PaymentStatus, item.OutstandingAmount, item.VoucherType, item.CounterpartyCode, item.CounterpartyName, item.CounterpartyTaxCode, item.CounterpartyAddress, receipt)
+		var payment, carry any
+		if len(item.CashPayment) > 0 {
+			payment = string(item.CashPayment)
+		}
+		if len(item.CarryForward) > 0 {
+			carry = string(item.CarryForward)
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO transactions (id,period_id,transaction_date,type,description,invoice_no,amount,vat_amount,revenue_category,document_no,payment_status,outstanding_amount,voucher_type,counterparty_code,counterparty_name,counterparty_tax_code,counterparty_address,cash_receipt_data,cash_payment_data,carry_forward_data) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,NULLIF($10,''),NULLIF($11,''),$12,NULLIF($13,''),NULLIF($14,''),NULLIF($15,''),NULLIF($16,''),NULLIF($17,''),$18::jsonb,$19::jsonb,$20::jsonb)
+			ON CONFLICT (id) DO UPDATE SET period_id=EXCLUDED.period_id,transaction_date=EXCLUDED.transaction_date,type=EXCLUDED.type,description=EXCLUDED.description,invoice_no=EXCLUDED.invoice_no,amount=EXCLUDED.amount,vat_amount=EXCLUDED.vat_amount,revenue_category=EXCLUDED.revenue_category,document_no=EXCLUDED.document_no,payment_status=EXCLUDED.payment_status,outstanding_amount=EXCLUDED.outstanding_amount,voucher_type=EXCLUDED.voucher_type,counterparty_code=EXCLUDED.counterparty_code,counterparty_name=EXCLUDED.counterparty_name,counterparty_tax_code=EXCLUDED.counterparty_tax_code,counterparty_address=EXCLUDED.counterparty_address,cash_receipt_data=EXCLUDED.cash_receipt_data,cash_payment_data=EXCLUDED.cash_payment_data,carry_forward_data=EXCLUDED.carry_forward_data,updated_at=NOW()`, item.ID, item.PeriodID, item.Date, item.Type, item.Description, item.InvoiceNo, item.Amount, item.VATAmount, item.RevenueCategory, item.DocumentNo, item.PaymentStatus, item.OutstandingAmount, item.VoucherType, item.CounterpartyCode, item.CounterpartyName, item.CounterpartyTaxCode, item.CounterpartyAddress, receipt, payment, carry)
 		if err != nil {
 			return fmt.Errorf("save transaction %s: %w", item.ID, err)
 		}

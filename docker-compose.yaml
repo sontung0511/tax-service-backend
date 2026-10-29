@@ -20,7 +20,7 @@ services:
     ports:
       - "8080:8080"
     environment:
-      CORS_ALLOWED_ORIGIN: http://localhost:3000
+      CORS_ALLOWED_ORIGIN: http://localhost:3001
       AUTH_TOKEN: mock-session-token
       DATABASE_URL: postgres://taxapp:taxapp@postgres:5432/taxdb?sslmode=disable
     depends_on:

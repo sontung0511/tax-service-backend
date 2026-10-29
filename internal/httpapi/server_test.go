@@ -302,3 +302,31 @@ func TestValidVATRate(t *testing.T) {
 		}
 	}
 }
+
+func TestCashPaymentAndCarryForwardVouchers(t *testing.T) {
+	handler := newTestServer(t)
+	payment := map[string]any{"periodId": "2026-q3", "status": "saved", "postingDate": "2026-08-11", "voucherDate": "2026-08-11", "paymentNo": "PC-0001", "recipientName": "NCC A", "description": "Chi mua hàng", "debitAccount": "632", "creditAccount": "1111", "amount": 500000, "quantity": 1, "unitPrice": 500000, "currency": "VND", "exchangeRate": 1}
+	if created := request(t, handler, http.MethodPost, "/api/cash-payments", payment, true); created.Code != http.StatusCreated {
+		t.Fatalf("cash payment status = %d body=%s", created.Code, created.Body.String())
+	}
+	carry := map[string]any{"periodId": "2026-q3", "status": "saved", "voucherNo": "KC-0001", "voucherDate": "2026-09-30", "postingDate": "2026-09-30", "description": "Kết chuyển cuối kỳ", "entries": []map[string]any{{"debitAccount": "511", "creditAccount": "911", "amount": 1000, "description": "Kết chuyển doanh thu"}}}
+	created := request(t, handler, http.MethodPost, "/api/carry-forwards", carry, true)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("carry forward status = %d body=%s", created.Code, created.Body.String())
+	}
+	var item struct {
+		ID, Type, VoucherType string
+		Amount                int64
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &item); err != nil || item.Type != "carry_forward" || item.VoucherType != "carry_forward" || item.Amount != 1000 {
+		t.Fatalf("unexpected carry forward: %+v err=%v", item, err)
+	}
+	carry["entries"] = []map[string]any{{"debitAccount": "511", "creditAccount": "511", "amount": 1000}}
+	if bad := request(t, handler, http.MethodPut, "/api/carry-forwards/"+item.ID, carry, true); bad.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("same-account entry status = %d", bad.Code)
+	}
+	calc := request(t, handler, http.MethodPost, "/api/calculate", map[string]string{"periodId": "2026-q3"}, true)
+	if calc.Code != http.StatusOK {
+		t.Fatalf("calculate status = %d body=%s", calc.Code, calc.Body.String())
+	}
+}

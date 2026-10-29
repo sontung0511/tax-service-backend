@@ -50,6 +50,8 @@ func Calculate(period domain.TaxPeriod, transactions []domain.Transaction, now t
 			categoryRevenue[item.RevenueCategory] += item.Amount
 		case "expense":
 			expenses += item.Amount
+		case "carry_forward":
+			// Bút toán kết chuyển chỉ chuyển số dư giữa các tài khoản, không phải doanh thu/chi phí.
 		default:
 			return domain.TaxBreakdown{}, fmt.Errorf("transaction %s has invalid type", item.ID)
 		}
