@@ -24,8 +24,9 @@ import (
 const maxBodyBytes = 10 << 20
 
 var (
-	errNotFound = errors.New("resource not found")
-	errConflict = errors.New("resource conflict")
+	errNotFound      = errors.New("resource not found")
+	errConflict      = errors.New("resource conflict")
+	errInvalidParent = errors.New("invalid parent account")
 )
 
 type Config struct {
@@ -75,8 +76,12 @@ func New(repo repository.Repository, cfg Config) http.Handler {
 	protected.HandleFunc("DELETE /api/transactions/{id}", s.deleteTransaction)
 	protected.HandleFunc("GET /api/counterparties", s.counterparties)
 	protected.HandleFunc("GET /api/accounts", s.accounts)
+	protected.HandleFunc("POST /api/accounts", s.createAccount)
+	protected.HandleFunc("PUT /api/accounts/{code}", s.updateAccount)
+	protected.HandleFunc("DELETE /api/accounts/{code}", s.deactivateAccount)
 	protected.HandleFunc("GET /api/counterparties/{code}", s.counterparty)
 	protected.HandleFunc("PUT /api/counterparties/{code}", s.counterparty)
+	protected.HandleFunc("DELETE /api/counterparties/{code}", s.deleteCounterparty)
 	protected.HandleFunc("POST /api/cash-receipts", s.cashReceipts)
 	protected.HandleFunc("PUT /api/cash-receipts/{id}", s.updateCashReceipt)
 	protected.HandleFunc("POST /api/cash-payments", s.cashPayments)
@@ -111,13 +116,127 @@ func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
+	includeInactive := r.URL.Query().Get("includeInactive") == "true" || r.URL.Query().Get("includeInactive") == "1"
 	items := make([]domain.Account, 0, len(db.Accounts))
 	for _, item := range db.Accounts {
-		if item.IsActive && (query == "" || strings.Contains(strings.ToLower(item.Code), query) || strings.Contains(strings.ToLower(item.Name), query)) {
+		if (item.IsActive || includeInactive) && (query == "" || strings.Contains(strings.ToLower(item.Code), query) || strings.Contains(strings.ToLower(item.Name), query)) {
 			items = append(items, item)
 		}
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
+	var input domain.Account
+	if err := decode(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	input.Code = strings.TrimSpace(input.Code)
+	input.Name = strings.TrimSpace(input.Name)
+	input.ParentCode = strings.TrimSpace(input.ParentCode)
+	if err := validateAccount(input); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		return
+	}
+	err := s.repo.Update(r.Context(), func(db *domain.Database) error {
+		if accountExists(db.Accounts, input.Code) {
+			return errConflict
+		}
+		if input.ParentCode != "" && !accountExists(db.Accounts, input.ParentCode) {
+			return errInvalidParent
+		}
+		db.Accounts = append(db.Accounts, input)
+		prependAudit(db, s.now(), "Tạo tài khoản", input.Code+" · "+input.Name)
+		return nil
+	})
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "account_exists", "mã tài khoản đã tồn tại")
+		return
+	}
+	if errors.Is(err, errInvalidParent) {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_parent", "tài khoản cha không tồn tại")
+		return
+	}
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, input)
+}
+
+func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
+	code := strings.TrimSpace(r.PathValue("code"))
+	var input domain.Account
+	if err := decode(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if input.Code != "" && input.Code != code {
+		writeError(w, http.StatusBadRequest, "id_mismatch", "mã tài khoản trong URL và dữ liệu không khớp")
+		return
+	}
+	input.Code = code
+	input.Name = strings.TrimSpace(input.Name)
+	input.ParentCode = strings.TrimSpace(input.ParentCode)
+	if err := validateAccount(input); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		return
+	}
+	err := s.repo.Update(r.Context(), func(db *domain.Database) error {
+		if input.ParentCode == code {
+			return errInvalidParent
+		}
+		if input.ParentCode != "" && !accountExists(db.Accounts, input.ParentCode) {
+			return errInvalidParent
+		}
+		for i := range db.Accounts {
+			if db.Accounts[i].Code == code {
+				db.Accounts[i] = input
+				prependAudit(db, s.now(), "Cập nhật tài khoản", input.Code+" · "+input.Name)
+				return nil
+			}
+		}
+		return errNotFound
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "account_not_found", "không tìm thấy tài khoản")
+		return
+	}
+	if errors.Is(err, errInvalidParent) {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_parent", "tài khoản cha không hợp lệ")
+		return
+	}
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, input)
+}
+
+func (s *Server) deactivateAccount(w http.ResponseWriter, r *http.Request) {
+	code := strings.TrimSpace(r.PathValue("code"))
+	var updated domain.Account
+	err := s.repo.Update(r.Context(), func(db *domain.Database) error {
+		for i := range db.Accounts {
+			if db.Accounts[i].Code == code {
+				db.Accounts[i].IsActive = false
+				updated = db.Accounts[i]
+				prependAudit(db, s.now(), "Ngừng sử dụng tài khoản", code)
+				return nil
+			}
+		}
+		return errNotFound
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "account_not_found", "không tìm thấy tài khoản")
+		return
+	}
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
@@ -382,6 +501,29 @@ func (s *Server) counterparty(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, input)
+}
+
+func (s *Server) deleteCounterparty(w http.ResponseWriter, r *http.Request) {
+	code := strings.TrimSpace(r.PathValue("code"))
+	err := s.repo.Update(r.Context(), func(db *domain.Database) error {
+		for i, item := range db.Counterparties {
+			if item.Code == code {
+				db.Counterparties = append(db.Counterparties[:i], db.Counterparties[i+1:]...)
+				prependAudit(db, s.now(), "Xóa đối tượng", code)
+				return nil
+			}
+		}
+		return errNotFound
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "counterparty_not_found", "không tìm thấy đối tượng")
+		return
+	}
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) cashReceipts(w http.ResponseWriter, r *http.Request) {
@@ -824,6 +966,28 @@ func validateDeclaration(d domain.TaxDeclaration) error {
 		}
 	}
 	return nil
+}
+
+func validateAccount(item domain.Account) error {
+	if !validAccount(item.Code) {
+		return errors.New("mã tài khoản phải gồm 3 đến 10 chữ số")
+	}
+	if name := strings.TrimSpace(item.Name); name == "" || len(name) > 255 {
+		return errors.New("tên tài khoản phải có từ 1 đến 255 ký tự")
+	}
+	if item.ParentCode != "" && !validAccount(item.ParentCode) {
+		return errors.New("mã tài khoản cha không hợp lệ")
+	}
+	return nil
+}
+
+func accountExists(items []domain.Account, code string) bool {
+	for _, item := range items {
+		if item.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func validateCounterparty(item domain.Counterparty) error {
